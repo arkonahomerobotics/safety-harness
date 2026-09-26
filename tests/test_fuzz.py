@@ -194,6 +194,19 @@ class RandomFuzzTests(unittest.TestCase):
             drop_tolerance_m=rng.choice([None, 0.0, rng.uniform(0, 2)]),
         )
 
+    # The fixed straight-line trajectory used everywhere below (fixtures.straight_line_trajectory)
+    # sweeps (0.5, 0, 0.3) -> (0.5, 0, 0.05). An agent uniformly random over +-5m in every dimension
+    # almost never lands within the two proximity-gated checks' tight radii (contact_plausible_range_m
+    # =0.3 on iso15066_power_force_limiting, collaborative_zone_radius_m=1.5 on reduced_speed_near_human)
+    # -- confirmed by a real local run where both showed fail=0 across 3000 iterations. Bias some
+    # fraction of agents to actually land near the swept path instead of only ever generating "far".
+    _PATH_MIDPOINT = (0.5, 0.0, 0.175)
+
+    def _random_agent_position(self, rng):
+        if rng.random() < 0.4:
+            return tuple(self._PATH_MIDPOINT[i] + rng.uniform(-2.0, 2.0) for i in range(3))
+        return tuple(rng.uniform(-5, 5) for _ in range(3))
+
     def _random_state(self, rng):
         n_objects = rng.randint(1, 4)
         objects = tuple(self._random_object(rng, f"obj_{k}") for k in range(n_objects))
@@ -201,17 +214,39 @@ class RandomFuzzTests(unittest.TestCase):
         agents = tuple(
             TrackedAgent(
                 agent_id=f"agent_{k}",
-                pose=Pose(position=tuple(rng.uniform(-5, 5) for _ in range(3))),
+                pose=Pose(position=self._random_agent_position(rng)),
                 tracking_confidence=rng.choice([0.0, rng.random(), 1.0]),
                 time_since_confirmed_s=rng.uniform(0, 10),
                 worst_case_speed_mps=rng.uniform(0.1, 3.0),
             )
             for k in range(n_agents)
         )
-        return WorldState(
-            objects=objects, agents=agents, robot=fixtures.robot_state(),
-            environment=EnvironmentSignals(visibility_confidence=rng.choice([0.0, rng.random(), 1.0])),
+        # robot=None and a populated surface_hazards are real states the harness must handle (see
+        # robot_state_confirmed / environment_hazard_clear) but this generator never produced either
+        # before -- both checks showed fail=0 across 3000 iterations in a real run as a direct result.
+        robot = fixtures.robot_state() if rng.random() < 0.85 else None
+        surface_hazards = (
+            frozenset(rng.sample(["spill", "smoke", "debris", "ice", "loose_cable"], k=rng.randint(1, 2)))
+            if rng.random() < 0.3
+            else frozenset()
         )
+        return WorldState(
+            objects=objects, agents=agents, robot=robot,
+            environment=EnvironmentSignals(
+                visibility_confidence=rng.choice([0.0, rng.random(), 1.0]),
+                surface_hazards=surface_hazards,
+            ),
+        )
+
+    def _random_trajectory(self, rng):
+        # The fixed fixtures.straight_line_trajectory() moves at exactly 0.25m/s -- which sits
+        # exactly ON reduced_speed_near_human's default max_speed_in_zone_mps=0.25 boundary (a
+        # strict ">" check), so that check could never fail no matter how close an agent got.
+        # Confirmed by a real run: fail=0 even after agents were biased onto the path. Vary the
+        # horizon to vary commanded speed over the same physical path instead of only ever moving
+        # at exactly the threshold speed.
+        horizon_s = rng.choice([1.0, 1.0, 0.5, 0.1, 0.05])
+        return fixtures.straight_line_trajectory(horizon_s=horizon_s)
 
     def test_permit_implies_every_result_satisfied(self):
         rng = random.Random(self.SEED)
@@ -220,7 +255,7 @@ class RandomFuzzTests(unittest.TestCase):
         for i in range(self.N_ITERATIONS):
             state = self._random_state(rng)
             target_id = state.objects[0].object_id
-            gate = gate_for(state)
+            gate = gate_for(state, self._random_trajectory(rng))
             try:
                 decision = gate.gate(Action(action_type="grasp", params={"object_id": target_id, "target_position": (0.5, 0, 0.05)}))
             except Exception as exc:  # noqa: BLE001
@@ -242,13 +277,17 @@ class RandomFuzzTests(unittest.TestCase):
 
     def test_no_check_is_dead_code(self):
         # A check that never fires across 3000 randomized world states either has a bug, or is
-        # unreachable given how the fixtures are generated -- worth knowing either way.
+        # unreachable given how the fixtures are generated -- worth knowing either way. This used to
+        # only print a NOTE; two checks (robot_state_confirmed, environment_hazard_clear) sat at
+        # fail=0 and two more (iso15066_power_force_limiting, reduced_speed_near_human) sat at
+        # fail=0 too, unnoticed, until a real local run surfaced it. Asserting on it turns that back
+        # into something CI catches on its own instead of a fact someone has to remember to check.
         rng = random.Random(self.SEED + 1)
         fired_histogram = {}
         for _ in range(self.N_ITERATIONS):
             state = self._random_state(rng)
             target_id = state.objects[0].object_id
-            gate = gate_for(state)
+            gate = gate_for(state, self._random_trajectory(rng))
             decision = gate.gate(Action(action_type="grasp", params={"object_id": target_id, "target_position": (0.5, 0, 0.05)}))
             for r in decision.precondition_results:
                 fired_histogram.setdefault(r.name, {"pass": 0, "fail": 0})
@@ -258,10 +297,17 @@ class RandomFuzzTests(unittest.TestCase):
             print(f"    {name}: pass={counts['pass']} fail={counts['fail']}")
         never_fails = [name for name, c in fired_histogram.items() if c["fail"] == 0]
         never_passes = [name for name, c in fired_histogram.items() if c["pass"] == 0]
-        if never_fails:
-            print(f"  NOTE: checks that never failed across {self.N_ITERATIONS} random states: {never_fails}")
-        if never_passes:
-            print(f"  NOTE: checks that never passed across {self.N_ITERATIONS} random states: {never_passes}")
+        self.assertEqual(
+            never_fails, [],
+            f"checks with zero failures across {self.N_ITERATIONS} random states -- either dead "
+            f"code, an always-true check, or (as happened before) the generator never produces the "
+            f"input shape that would make them fail: {never_fails}",
+        )
+        self.assertEqual(
+            never_passes, [],
+            f"checks that never passed across {self.N_ITERATIONS} random states -- either always-"
+            f"false, or the generator never produces the input shape that satisfies them: {never_passes}",
+        )
 
 
 class PathologicalInputTests(unittest.TestCase):
