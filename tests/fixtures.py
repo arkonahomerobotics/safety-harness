@@ -1,0 +1,180 @@
+"""Hand-built WorldState fixtures for testing the engine with no robot, no adapter, and no
+perception noise involved (Development Roadmap stage 2; Testing and Validation Strategy in the
+design doc).
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+from safety_harness.schema import (
+    Action,
+    EnvironmentSignals,
+    FallConsequence,
+    HazardTag,
+    Pose,
+    PredictedTrajectory,
+    RobotProprioception,
+    TrackedAgent,
+    TrackedObject,
+    TrajectoryPoint,
+    WorldState,
+)
+
+
+def robot_state(ee_position=(0.5, 0.0, 0.3)) -> RobotProprioception:
+    """No kinematic/electrical limits reported -- the sparse default. Every limit check must
+    default-deny against this, matching every other "unconfirmed" case in the module."""
+    return RobotProprioception(
+        joint_positions=(0.0,) * 7,
+        joint_velocities=(0.0,) * 7,
+        end_effector_pose=Pose(position=ee_position),
+        gripper_state=1.0,
+    )
+
+
+def instrumented_robot_state(
+    ee_position=(0.5, 0.0, 0.3), joint_positions=(0.0,) * 7, joint_velocities=(0.0,) * 7,
+    joint_efforts=(0.0,) * 7, max_cartesian_speed_mps=1.0,
+) -> RobotProprioception:
+    """A fully-instrumented robot state: joint limits, effort limits, and thermal limits all
+    reported and comfortably satisfied -- the positive case for every kinematic/electrical check."""
+    return RobotProprioception(
+        joint_positions=joint_positions,
+        joint_velocities=joint_velocities,
+        end_effector_pose=Pose(position=ee_position),
+        gripper_state=1.0,
+        joint_position_limits=((-2.9, 2.9),) * 7,
+        joint_velocity_limits=(2.5,) * 7,
+        joint_effort_limits=(87.0,) * 7,
+        estimated_joint_efforts=joint_efforts,
+        motor_temperature_c=(40.0,) * 7,
+        motor_temperature_limit_c=(80.0,) * 7,
+        max_cartesian_speed_mps=max_cartesian_speed_mps,
+        battery_charge_fraction=0.9,
+    )
+
+
+def confirmed_object(object_id="cube_2", hazard_tags=frozenset(), mass_kg=0.05, position=(0.5, 0.0, 0.05)) -> TrackedObject:
+    """A fully cleared, harmless foam training cube: safe to approach, currently stable, and
+    tolerates being dropped (fall_consequence=NONE)."""
+    return TrackedObject(
+        object_id=object_id,
+        object_class="cube",
+        pose=Pose(position=position),
+        estimated_mass_kg=mass_kg,
+        hazard_tags=hazard_tags or frozenset({HazardTag.FRAGILE}),
+        pose_confidence=1.0,
+        class_confidence=1.0,
+        cleared_for_interaction=True,
+        supported_stably=True,
+        fall_consequence=FallConsequence.NONE,
+    )
+
+
+def uncleared_bystander_object(object_id="cube_3", position=(0.55, 0.0, 0.05)) -> TrackedObject:
+    """An object perception has NOT cleared for interaction and confirms would release a hazard if
+    struck -- e.g. the user's "the green cube is actually hazardous" case. Never the action's own
+    target in these tests; it blocks purely by being near the swept path."""
+    return TrackedObject(
+        object_id=object_id,
+        object_class="cube",
+        pose=Pose(position=position),
+        estimated_mass_kg=0.05,
+        hazard_tags=frozenset({HazardTag.UNKNOWN}),
+        pose_confidence=1.0,
+        class_confidence=1.0,
+        cleared_for_interaction=False,
+        supported_stably=True,
+        fall_consequence=FallConsequence.HAZARDOUS_RELEASE,
+        drop_tolerance_m=0.0,
+    )
+
+
+def unstable_object(object_id="cube_2", position=(0.5, 0.0, 0.05)) -> TrackedObject:
+    """Cleared for interaction, but its current resting position is confirmed NOT stable -- e.g.
+    teetering on the edge of a table."""
+    obj = confirmed_object(object_id=object_id, position=position)
+    return replace(obj, supported_stably=False)
+
+
+def fragile_high_lift_object(object_id="cube_2", position=(0.5, 0.0, 0.05), drop_tolerance_m=0.02) -> TrackedObject:
+    """Cleared and currently stable, but confirmed fragile enough that only a very small lift is
+    tolerable -- exercises fall_consequence_acceptable independent of every other check."""
+    obj = confirmed_object(object_id=object_id, position=position)
+    return replace(obj, fall_consequence=FallConsequence.MESS, drop_tolerance_m=drop_tolerance_m)
+
+
+def unknown_object(object_id="mystery_object", position=(0.5, 0.0, 0.05)) -> TrackedObject:
+    """An object perception hasn't classified -- must default-deny, not default-permit."""
+    return TrackedObject(
+        object_id=object_id,
+        object_class="unknown",
+        pose=Pose(position=position),
+        estimated_mass_kg=None,
+        hazard_tags=frozenset({HazardTag.UNKNOWN}),
+        pose_confidence=0.9,
+        class_confidence=0.1,
+    )
+
+
+def far_agent(agent_id="person_1") -> TrackedAgent:
+    return TrackedAgent(
+        agent_id=agent_id,
+        pose=Pose(position=(5.0, 5.0, 0.0)),
+        tracking_confidence=0.95,
+        time_since_confirmed_s=0.0,
+        worst_case_speed_mps=1.5,
+    )
+
+
+def close_agent(agent_id="person_1") -> TrackedAgent:
+    return TrackedAgent(
+        agent_id=agent_id,
+        pose=Pose(position=(0.55, 0.0, 0.05)),  # right next to the target below
+        tracking_confidence=0.95,
+        time_since_confirmed_s=0.0,
+        worst_case_speed_mps=1.5,
+    )
+
+
+def stale_agent(agent_id="person_1") -> TrackedAgent:
+    """Tracked once, far away, but long enough ago that the worst-case radius now reaches the
+    action -- exercises the staleness-widens-the-uncertainty-region path, not just distance."""
+    return TrackedAgent(
+        agent_id=agent_id,
+        pose=Pose(position=(2.0, 0.0, 0.0)),
+        tracking_confidence=0.95,
+        time_since_confirmed_s=5.0,
+        worst_case_speed_mps=1.5,
+    )
+
+
+def grasp_action(object_id="cube_2", target_position=(0.5, 0.0, 0.05)) -> Action:
+    return Action(action_type="grasp", params={"object_id": object_id, "target_position": target_position})
+
+
+def place_action(object_id="cube_2", target_surface_id="cube_1", target_position=(0.5, 0.0, 0.05)) -> Action:
+    return Action(
+        action_type="place",
+        params={"object_id": object_id, "target_surface_id": target_surface_id, "target_position": target_position},
+    )
+
+
+def straight_line_trajectory(start=(0.5, 0.0, 0.3), end=(0.5, 0.0, 0.05), horizon_s=1.0, n_points=5, radius_m=0.05) -> PredictedTrajectory:
+    points = []
+    for k in range(n_points):
+        t = horizon_s * k / (n_points - 1)
+        frac = k / (n_points - 1)
+        center = tuple(s + frac * (e - s) for s, e in zip(start, end))
+        points.append(TrajectoryPoint(t=t, robot=robot_state(center), swept_volume_center=center, swept_volume_radius_m=radius_m))
+    return PredictedTrajectory(points=tuple(points), horizon_s=horizon_s)
+
+
+def base_world_state(objects=(), agents=(), visibility=1.0) -> WorldState:
+    return WorldState(
+        objects=objects,
+        agents=agents,
+        robot=robot_state(),
+        environment=EnvironmentSignals(visibility_confidence=visibility),
+    )
