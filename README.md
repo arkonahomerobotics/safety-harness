@@ -1,5 +1,8 @@
 # Physical AI Safety Harness
 
+[![tests](https://github.com/naganumakr/safety-harness/actions/workflows/tests.yml/badge.svg)](https://github.com/naganumakr/safety-harness/actions/workflows/tests.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 A default-deny precondition gate for physical actuators. Every action a robot proposes — grasp,
 place, reach, anything else you register — must earn a `PERMIT` from measured, structured
 evidence before it executes. No evidence, or a failed check, or an adapter that raises: `BLOCK`.
@@ -38,10 +41,50 @@ are robot-agnostic. Only an Isaac Lab / Franka adapter exists today.
 
 ## Install & test
 
+Not on PyPI yet — install straight from GitHub:
+
 ```bash
+pip install git+https://github.com/naganumakr/safety-harness.git
+```
+
+Or for local development (editable, so edits to `safety_harness/` take effect immediately):
+
+```bash
+git clone https://github.com/naganumakr/safety-harness.git
+cd safety-harness
 pip install -e .
 python -m unittest discover -s tests -p "test_*.py"
 ```
+
+## Usage
+
+```python
+from safety_harness import ActionSchemaRegistry, ActuatorGate
+from safety_harness.adapters import FreezeInPlaceFallback, InMemoryLogger
+from safety_harness.adapters.isaac_lab import (
+    IsaacLabCubeStackPerceptionAdapter,
+    IsaacLabCubeStackDynamicsAdapter,
+)
+
+schema = ActionSchemaRegistry.from_yaml("configs/example_action_schema.yaml")
+gate = ActuatorGate(
+    perception=IsaacLabCubeStackPerceptionAdapter(...),   # swap for your own stack's adapter
+    dynamics=IsaacLabCubeStackDynamicsAdapter(...),
+    fallback=FreezeInPlaceFallback(),
+    logger=InMemoryLogger(),
+    schema=schema,
+)
+
+decision = gate.gate(proposed_action)  # -> Decision(verdict=PERMIT|BLOCK, ...)
+if decision.verdict.name == "PERMIT":
+    robot.execute(decision.action)
+else:
+    robot.execute(decision.action)  # the fallback action FreezeInPlaceFallback produced
+```
+
+Nothing here is Isaac-Lab-specific except the two adapter classes — swap those for adapters
+targeting your own robot stack and the engine, checks, and tests are unchanged. See "Contributing
+an adapter" below.
 
 ## License
 

@@ -8,8 +8,9 @@ version = "0.2.0"
 description = "Default-deny precondition gate for physical AI actuators: permission, not detection."
 readme = "README.md"
 license = { text = "Apache-2.0" }
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 authors = [{ name = "Kaoru Naganuma" }]
+dependencies = ["pyyaml>=6.0"]
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Development Status :: 3 - Alpha",

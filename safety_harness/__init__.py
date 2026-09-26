@@ -1,6 +1,7 @@
 from .action_schema import ActionSchemaRegistry
 from .engine import ActuatorGate, PerceptionFailure
 from .schema import (
+    SCHEMA_VERSION,
     Action,
     Decision,
     DecisionVerdict,
@@ -21,6 +22,7 @@ __all__ = [
     "ActionSchemaRegistry",
     "ActuatorGate",
     "PerceptionFailure",
+    "SCHEMA_VERSION",
     "Action",
     "Decision",
     "DecisionVerdict",
