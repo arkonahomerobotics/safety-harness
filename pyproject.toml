@@ -7,20 +7,30 @@ name = "safety-harness"
 version = "0.2.0"
 description = "Default-deny precondition gate for physical AI actuators: permission, not detection."
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 requires-python = ">=3.9"
-authors = [{ name = "Kaoru Naganuma" }]
+authors = [{ name = "Kaoru Naganuma", email = "kaoru.naganuma@gmail.com" }]
+keywords = ["robotics", "safety", "physical-ai", "isaac-lab", "iso-15066"]
 dependencies = ["pyyaml>=6.0"]
 classifiers = [
-    "License :: OSI Approved :: Apache Software License",
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Robotics",
     "Topic :: Software Development :: Libraries",
 ]
 
 [project.urls]
-Homepage = "https://claude.ai/artifact/V1cBKhjD94CZBj4D8kQjdU"
+Homepage = "https://github.com/naganumakr/safety-harness"
+Repository = "https://github.com/naganumakr/safety-harness"
+Issues = "https://github.com/naganumakr/safety-harness/issues"
+"Design doc" = "https://claude.ai/artifact/V1cBKhjD94CZBj4D8kQjdU"
 
 [tool.setuptools.packages.find]
 include = ["safety_harness*"]
