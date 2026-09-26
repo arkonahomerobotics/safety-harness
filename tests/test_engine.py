@@ -388,6 +388,18 @@ class PreconditionUnitTests(unittest.TestCase):
         result = pc.iso15066_separation_distance_maintained(state, fixtures.grasp_action(), PredictedTrajectory(points=(), horizon_s=1.0))
         self.assertFalse(result.satisfied)
 
+    def test_iso15066_decision_latency_widens_required_separation(self):
+        # decision_latency_s (added after tests/test_latency_stress.py found gate()'s own decision
+        # time isn't accounted for anywhere) must actually widen the required distance, not just
+        # exist as an unused parameter -- same distance, only decision_latency_s changes.
+        agent = replace(fixtures.close_agent(), pose=fixtures.Pose(position=(2.0, 0.0, 0.05)))
+        state = fixtures.base_world_state(objects=(fixtures.confirmed_object(),), agents=(agent,))
+        traj = fixtures.straight_line_trajectory()
+        baseline = pc.iso15066_separation_distance_maintained(state, fixtures.grasp_action(), traj, decision_latency_s=0.0)
+        with_latency = pc.iso15066_separation_distance_maintained(state, fixtures.grasp_action(), traj, decision_latency_s=1.0)
+        self.assertTrue(baseline.satisfied, f"expected the zero-latency baseline to permit; got: {baseline.reason}")
+        self.assertFalse(with_latency.satisfied, "a full extra second of decision_latency_s should have required more separation than was available")
+
 
 class RobotKinematicElectricalLimitTests(unittest.TestCase):
     """Checks for the robot's own physical limits: joint position/velocity/effort, motor

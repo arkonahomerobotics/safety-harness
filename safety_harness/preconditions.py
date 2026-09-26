@@ -18,6 +18,14 @@ _BYSTANDER_RISK_TAGS = frozenset({HazardTag.SHARP, HazardTag.HOT})
 
 MIN_CONFIDENCE = 0.6  # default confidence gate; override per rule via action_schema.yaml kwargs
 
+# iso15066_separation_distance_maintained's two reaction-time defaults, named at module level (not
+# just inline in the function signature) so tests/test_latency_stress.py can compare *measured*
+# gate() decision latency against the same numbers the check assumes -- one source of truth instead
+# of a second hardcoded 0.2 living only in the test file, silently able to drift out of sync.
+DEFAULT_REACTION_TIME_S = 0.15
+DEFAULT_SAMPLING_INTERVAL_S = 0.05
+REACTION_INTERVAL_S = DEFAULT_REACTION_TIME_S + DEFAULT_SAMPLING_INTERVAL_S
+
 
 def _distance(a, b) -> float:
     return math.sqrt(sum((ai - bi) ** 2 for ai, bi in zip(a, b)))
@@ -421,8 +429,9 @@ def battery_charge_sufficient(
 
 def iso15066_separation_distance_maintained(
     state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
-    reaction_time_s: float = 0.15,
-    sampling_interval_s: float = 0.05,
+    reaction_time_s: float = DEFAULT_REACTION_TIME_S,
+    sampling_interval_s: float = DEFAULT_SAMPLING_INTERVAL_S,
+    decision_latency_s: float = 0.0,
     max_deceleration_mps2: float = 5.0,
     intrusion_distance_m: float = 0.85,
     robot_position_uncertainty_m: float = 0.02,
@@ -440,11 +449,23 @@ def iso15066_separation_distance_maintained(
     deployment -- ISO/TS 15066 compliance requires a qualified safety engineer to set these from
     the actual system's characterized reaction time and the standard's current edition. See the
     design doc's Regulatory Mapping section.
+
+    ``reaction_time_s`` models only the robot's own hardware stop-response lag (ISO/TS 15066's
+    definition). It says nothing about how long ActuatorGate.gate() itself takes to decide BLOCK --
+    tests/test_latency_stress.py measures that under injected adapter jitter and found it can run
+    to hundreds of milliseconds, on top of (not instead of) the robot's hardware lag. ``
+    decision_latency_s`` exists to let a deployment add its own *measured* worst-case gate()
+    latency (e.g. a rolling p99 from its own Logger) into the required separation distance.
+    Defaulting it to 0.0 rather than a fabricated nonzero number is deliberate -- this codebase's
+    own rule is that a number nobody measured is worse than an explicit gap (see the design doc's
+    "Design Principle"). Leaving this at 0.0 in a real deployment means decision latency has not
+    been accounted for; that is a gap to close before relying on this check's number, not a safe
+    default.
     """
     points = trajectory.points
     if not points:
         return _fail("iso15066_separation_distance_maintained", "no predicted trajectory to evaluate")
-    reaction_interval = reaction_time_s + sampling_interval_s
+    reaction_interval = reaction_time_s + sampling_interval_s + decision_latency_s
     for agent in state.agents:
         prev = None
         for point in points:
