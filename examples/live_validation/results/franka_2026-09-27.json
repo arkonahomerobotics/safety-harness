@@ -1,0 +1,358 @@
+[
+ {
+  "label": "nominal grasp of a resting cube",
+  "kind": "nominal",
+  "expect": "permit",
+  "verdict": "permit",
+  "fired": [],
+  "pass": true
+ },
+ {
+  "label": "cube falling at 0.5 m/s",
+  "kind": "physical",
+  "expect": "current_position_confirmed_stable",
+  "verdict": "block",
+  "fired": [
+   "current_position_confirmed_stable"
+  ],
+  "pass": true
+ },
+ {
+  "label": "cube knocked sideways at 1.7 m/s",
+  "kind": "physical",
+  "expect": "current_position_confirmed_stable",
+  "verdict": "block",
+  "fired": [
+   "current_position_confirmed_stable"
+  ],
+  "pass": true
+ },
+ {
+  "label": "hazard-classified bystander cube physically moved 10cm from the target",
+  "kind": "physical+classification",
+  "expect": "swept_path_clear_of_risky_objects",
+  "verdict": "block",
+  "fired": [
+   "swept_path_clear_of_risky_objects"
+  ],
+  "pass": true
+ },
+ {
+  "label": "target not confirmed by perception (object_cleared_for_interaction)",
+  "kind": "classification",
+  "expect": "object_cleared_for_interaction",
+  "verdict": "block",
+  "fired": [
+   "object_cleared_for_interaction",
+   "current_position_confirmed_stable",
+   "fall_consequence_acceptable"
+  ],
+  "pass": true
+ },
+ {
+  "label": "target not confirmed by perception (current_position_confirmed_stable)",
+  "kind": "classification",
+  "expect": "current_position_confirmed_stable",
+  "verdict": "block",
+  "fired": [
+   "object_cleared_for_interaction",
+   "current_position_confirmed_stable",
+   "fall_consequence_acceptable"
+  ],
+  "pass": true
+ },
+ {
+  "label": "target not confirmed by perception (fall_consequence_acceptable)",
+  "kind": "classification",
+  "expect": "fall_consequence_acceptable",
+  "verdict": "block",
+  "fired": [
+   "object_cleared_for_interaction",
+   "current_position_confirmed_stable",
+   "fall_consequence_acceptable"
+  ],
+  "pass": true
+ },
+ {
+  "label": "visibility 0.49 (below 0.5)",
+  "kind": "injected",
+  "expect": "visibility_above_threshold",
+  "verdict": "block",
+  "fired": [
+   "visibility_above_threshold"
+  ],
+  "pass": true
+ },
+ {
+  "label": "NaN estimated_mass_kg on the live target",
+  "kind": "injected-fault",
+  "expect": "mass_within_force_budget",
+  "verdict": "block",
+  "fired": [
+   "mass_within_force_budget",
+   "payload_and_grip_force_within_limits"
+  ],
+  "pass": true
+ },
+ {
+  "label": "NaN class_confidence on the live target",
+  "kind": "injected-fault",
+  "expect": "object_hazard_confirmed",
+  "verdict": "block",
+  "fired": [
+   "object_hazard_confirmed"
+  ],
+  "pass": true
+ },
+ {
+  "label": "NaN pose_confidence on the live target",
+  "kind": "injected-fault",
+  "expect": "object_pose_confirmed",
+  "verdict": "block",
+  "fired": [
+   "object_pose_confirmed"
+  ],
+  "pass": true
+ },
+ {
+  "label": "adult 0.3m from the grasp target (swept_path_clear_of_agents)",
+  "kind": "injected-agent",
+  "expect": "swept_path_clear_of_agents",
+  "verdict": "block",
+  "fired": [
+   "swept_path_clear_of_agents",
+   "iso15066_separation_distance_maintained",
+   "vulnerable_bystander_protected",
+   "reduced_speed_near_human"
+  ],
+  "pass": true
+ },
+ {
+  "label": "adult 0.3m from the grasp target (iso15066_separation_distance_maintained)",
+  "kind": "injected-agent",
+  "expect": "iso15066_separation_distance_maintained",
+  "verdict": "block",
+  "fired": [
+   "swept_path_clear_of_agents",
+   "iso15066_separation_distance_maintained",
+   "iso15066_power_force_limiting",
+   "vulnerable_bystander_protected",
+   "reduced_speed_near_human"
+  ],
+  "pass": true
+ },
+ {
+  "label": "adult 0.3m from the grasp target (iso15066_power_force_limiting)",
+  "kind": "injected-agent",
+  "expect": "iso15066_power_force_limiting",
+  "verdict": "block",
+  "fired": [
+   "swept_path_clear_of_agents",
+   "iso15066_separation_distance_maintained",
+   "vulnerable_bystander_protected",
+   "reduced_speed_near_human"
+  ],
+  "pass": false
+ },
+ {
+  "label": "adult 0.3m from the grasp target (reduced_speed_near_human)",
+  "kind": "injected-agent",
+  "expect": "reduced_speed_near_human",
+  "verdict": "block",
+  "fired": [
+   "swept_path_clear_of_agents",
+   "iso15066_separation_distance_maintained",
+   "vulnerable_bystander_protected",
+   "reduced_speed_near_human"
+  ],
+  "pass": true
+ },
+ {
+  "label": "arm joint 0 physically within 0.01 rad of its limit (measured 2.8873, limit 2.8973)",
+  "kind": "physical",
+  "expect": "joint_position_limits_respected",
+  "verdict": "block",
+  "fired": [
+   "joint_position_limits_respected"
+  ],
+  "pass": true
+ },
+ {
+  "label": "reach commanded at ~40 m/s (2.0m in 0.05s)",
+  "kind": "commanded",
+  "expect": "cartesian_speed_within_limits",
+  "verdict": "block",
+  "fired": [
+   "cartesian_speed_within_limits"
+  ],
+  "pass": true
+ },
+ {
+  "label": "control: reach 10cm at 0.1 m/s",
+  "kind": "nominal",
+  "expect": "permit",
+  "verdict": "permit",
+  "fired": [],
+  "pass": true
+ },
+ {
+  "label": "slow teammate 2.8m ahead; speed unstated (old capped model, 0.5 m/s)",
+  "kind": "speed-model",
+  "expect": "permit",
+  "verdict": "permit",
+  "fired": [],
+  "pass": true
+ },
+ {
+  "label": "same, but the controller commands 1.6 m/s (within the 1.7 m/s rating)",
+  "kind": "speed-model",
+  "expect": "swept_path_clear_of_agents",
+  "verdict": "block",
+  "fired": [
+   "swept_path_clear_of_agents",
+   "iso15066_separation_distance_maintained",
+   "iso15066_power_force_limiting",
+   "vulnerable_bystander_protected",
+   "reduced_speed_near_human"
+  ],
+  "pass": true
+ },
+ {
+  "label": "spill reported on the work surface",
+  "kind": "injected",
+  "expect": "environment_hazard_clear",
+  "verdict": "block",
+  "fired": [
+   "environment_hazard_clear"
+  ],
+  "pass": true
+ },
+ {
+  "label": "robot proprioception missing entirely (robot=None)",
+  "kind": "injected-fault",
+  "expect": "adapter_error",
+  "verdict": "block",
+  "fired": [
+   "adapter_error"
+  ],
+  "pass": true
+ },
+ {
+  "label": "joint readings NaN (robot state present but corrupt)",
+  "kind": "injected-fault",
+  "expect": "joint_position_limits_respected",
+  "verdict": "block",
+  "fired": [
+   "joint_position_limits_respected"
+  ],
+  "pass": true
+ },
+ {
+  "label": "place onto a resting cube",
+  "kind": "nominal",
+  "expect": "permit",
+  "verdict": "permit",
+  "fired": [],
+  "pass": true
+ },
+ {
+  "label": "place onto a cube that is sliding at 0.6 m/s",
+  "kind": "physical",
+  "expect": "destination_confirmed_stable_and_clear",
+  "verdict": "block",
+  "fired": [
+   "destination_confirmed_stable_and_clear"
+  ],
+  "pass": true
+ },
+ {
+  "label": "state built from 1s-old sensor data",
+  "kind": "injected",
+  "expect": "sensor_data_fresh",
+  "verdict": "block",
+  "fired": [
+   "sensor_data_fresh"
+  ],
+  "pass": true
+ },
+ {
+  "label": "path runs through space no sensor observed",
+  "kind": "injected",
+  "expect": "swept_path_observed",
+  "verdict": "block",
+  "fired": [
+   "swept_path_observed"
+  ],
+  "pass": true
+ },
+ {
+  "label": "60 N grip on the fragile cube (cap 15 N)",
+  "kind": "commanded",
+  "expect": "payload_and_grip_force_within_limits",
+  "verdict": "block",
+  "fired": [
+   "payload_and_grip_force_within_limits"
+  ],
+  "pass": true
+ },
+ {
+  "label": "5 kg object reported (rated payload 3 kg)",
+  "kind": "injected",
+  "expect": "payload_and_grip_force_within_limits",
+  "verdict": "block",
+  "fired": [
+   "mass_within_force_budget",
+   "payload_and_grip_force_within_limits"
+  ],
+  "pass": true
+ },
+ {
+  "label": "child 2m from the path",
+  "kind": "injected-agent",
+  "expect": "vulnerable_bystander_protected",
+  "verdict": "block",
+  "fired": [
+   "vulnerable_bystander_protected"
+  ],
+  "pass": true
+ },
+ {
+  "label": "action rewritten (grip 5 -> 200 N) while being checked",
+  "kind": "injected-attack",
+  "expect": "command_integrity_verified",
+  "verdict": "block",
+  "fired": [
+   "payload_and_grip_force_within_limits",
+   "command_integrity_verified"
+  ],
+  "pass": true
+ },
+ {
+  "label": "live config tampered after verification (force budget 3 -> 300 kg)",
+  "kind": "injected-attack",
+  "expect": "config_integrity_verified",
+  "verdict": "block",
+  "fired": [
+   "config_integrity_verified"
+  ],
+  "pass": true
+ },
+ {
+  "label": "dynamics model stalls 0.15s (deadline 0.1s)",
+  "kind": "injected",
+  "expect": "decision_within_deadline",
+  "verdict": "block",
+  "fired": [
+   "decision_within_deadline"
+  ],
+  "pass": true
+ },
+ {
+  "label": "watchdog: fresh PERMIT executes, same PERMIT 0.3s later freezes",
+  "kind": "runtime",
+  "expect": "grasp then freeze",
+  "verdict": "grasp then freeze",
+  "fired": [],
+  "pass": true
+ }
+]

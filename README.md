@@ -14,9 +14,16 @@ Full design spec, architecture, worked examples, test/validation record, and roa
 
 ## Status
 
-Reference implementation, not yet independently assessed. Validated against two robots (a Franka
-Panda arm; an ANYmal-C quadruped) in one simulator (Isaac Lab), with 207 automated
-unit/fuzz/mutation/black-box/stress tests and 7 live hazard-scenario recordings. A third adapter (a
+Reference implementation, not yet independently assessed. Of its 31 precondition checks, **24 are
+confirmed blocking live** in one simulator (Isaac Lab) on two robots, a Franka Panda arm and an
+ANYmal-C quadruped:
+- the hazards were physical in the simulator, commanded by the action, or injected into the
+  otherwise-real world state;
+- 1 more check was evaluated live but never the reason for a block, and 6 are registered but not
+  wired into the example config;
+- see the design doc's "Live Re-validation of the Wired Set" for the per-check record.
+
+Plus 227 automated unit/fuzz/mutation/black-box/stress tests. A third adapter (a
 Unitree G1 humanoid with a dexterous hand) ships with a trained block-stacking policy to gate — see
 [`examples/isaac_lab_g1_stack`](examples/isaac_lab_g1_stack/); gating that policy under injected
 hazards is in progress, not yet a validation result. It has **not**
@@ -41,8 +48,8 @@ evidence, not a certification.
 - `safety_harness/watchdog.py` — `DecisionWatchdog`, an actuator-side dead-man's switch: execute
   only a PERMIT that is still fresh and bit-identical to what was checked, otherwise freeze.
 - `safety_harness/integrity.py` / `safety_harness/pin.py` — action digests and configuration
-  pinning (`python -m safety_harness.pin configs/example_action_schema.yaml` regenerates the
-  `.sha256`).
+  pinning (`python -m safety_harness.pin configs/example_action_schema.yaml >
+  configs/example_action_schema.yaml.sha256` regenerates the pin; the command prints the digest).
 - `safety_harness/action_schema.py` — the YAML-driven registry mapping action types to the checks
   they must pass (`configs/example_action_schema.yaml` is the reference wiring).
 - `tests/` — unit tests, mutation/random-fuzz tests, and reflection-driven black-box contract

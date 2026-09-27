@@ -130,7 +130,10 @@ class RobotProprioception:
     # observes freshly each cycle, but carried alongside state so the same per-point trajectory
     # checking machinery used for balance/clearance can also check the robot's own physical limits.
     # None means "not reported" and every check below treats that as default-deny, same as elsewhere.
-    joint_position_limits: Optional[tuple] = None  # tuple of (min, max) pairs, same order as joint_positions
+    # tuple of (min, max) pairs, same order and length as joint_positions. A None entry explicitly
+    # exempts one joint that is designed to rest on its mechanical stop (a gripper finger) -- see
+    # joint_position_limits_respected. The whole field None = unreported -> default-deny.
+    joint_position_limits: Optional[tuple] = None
     joint_velocity_limits: Optional[tuple] = None  # tuple of max |velocity|, same order as joint_velocities
     joint_effort_limits: Optional[tuple] = None  # tuple of max |torque or current| per joint
     estimated_joint_efforts: Optional[tuple] = None  # current estimated/commanded effort per joint

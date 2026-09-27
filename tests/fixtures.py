@@ -34,14 +34,18 @@ NAV_AREA_OBSERVED = (ObservedRegion(min_corner=(-2.0, -3.0, -0.5), max_corner=(6
 SAFE_GRIP_FORCE_N = 5.0
 
 
-def robot_state(ee_position=(0.5, 0.0, 0.3)) -> RobotProprioception:
-    """No kinematic/electrical limits reported -- the sparse default. Every limit check must
-    default-deny against this, matching every other "unconfirmed" case in the module."""
+def robot_state(ee_position=(0.5, 0.0, 0.3), report_wired_limits=True) -> RobotProprioception:
+    """Reports only the two self-limits the example schema wires (joint position limits and the
+    Cartesian speed rating); every other kinematic/electrical limit is unreported -- the sparse
+    default, which every unwired limit check must default-deny. report_wired_limits=False gives the
+    fully sparse state, for testing those two checks' own default-deny."""
     return RobotProprioception(
         joint_positions=(0.0,) * 7,
         joint_velocities=(0.0,) * 7,
         end_effector_pose=Pose(position=ee_position),
         gripper_state=1.0,
+        joint_position_limits=((-2.9, 2.9),) * 7 if report_wired_limits else None,
+        max_cartesian_speed_mps=1.0 if report_wired_limits else None,
     )
 
 
@@ -178,6 +182,8 @@ def quadruped_robot_state(
         center_of_mass=base_position,
         support_polygon=support_polygon,
         center_of_mass_velocity=com_velocity,
+        joint_position_limits=((-3.0, 3.0),) * 12,
+        max_cartesian_speed_mps=1.0,
     )
 
 

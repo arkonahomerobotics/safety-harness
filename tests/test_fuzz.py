@@ -78,7 +78,11 @@ class _StubDynamics(DynamicsAdapter):
         self._trajectory = trajectory
 
     def predict_trajectory(self, state, action, horizon_s):
-        return self._trajectory
+        # Carry the state's own robot on every point, as the reference adapters do -- otherwise the
+        # joint-state checks only ever see the fixture's mid-range robot, whatever the random state.
+        if state.robot is None:
+            return self._trajectory
+        return replace(self._trajectory, points=tuple(replace(p, robot=state.robot) for p in self._trajectory.points))
 
 
 def gate_for(state, trajectory=None, expected_digest=PINNED_DIGEST, clock=None):
@@ -255,6 +259,13 @@ class RandomFuzzTests(unittest.TestCase):
         # robot_state_confirmed / environment_hazard_clear) but this generator never produced either
         # before -- both checks showed fail=0 across 3000 iterations in a real run as a direct result.
         robot = fixtures.robot_state() if rng.random() < 0.85 else None
+        # joint_position_limits_respected is wired since v0.3.1; without this the generator only ever
+        # produced mid-range joints and the check sat at fail=0 (caught by test_no_check_is_dead_code).
+        if robot is not None and rng.random() < 0.3:
+            j = rng.randrange(len(robot.joint_positions))
+            q = list(robot.joint_positions)
+            q[j] = rng.choice((2.89, -2.89, rng.uniform(-3.5, 3.5)))  # limits are (-2.9, 2.9), margin 0.02
+            robot = replace(robot, joint_positions=tuple(q))
         surface_hazards = (
             frozenset(rng.sample(["spill", "smoke", "debris", "ice", "loose_cable"], k=rng.randint(1, 2)))
             if rng.random() < 0.3

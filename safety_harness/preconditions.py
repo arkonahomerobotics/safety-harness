@@ -561,12 +561,31 @@ def joint_position_limits_respected(
     safety_margin: float = 0.02,
 ) -> PreconditionResult:
     """Does the predicted motion keep every joint within its own position limits, with a margin --
-    not just at the destination, at every predicted point."""
+    not just at the destination, at every predicted point.
+
+    Scope, stated plainly: this checks the joint state carried on each trajectory point. The
+    reference adapters forward-predict the Cartesian sweep only and carry the *current* joint state
+    on every point, so with them this catches "already at or near a limit", not "this command will
+    drive a joint past its limit" -- that needs a dynamics adapter that predicts joint motion.
+
+    A ``None`` entry in ``joint_position_limits`` is an explicit exemption the adapter must declare
+    for a joint designed to rest on its mechanical stop (a gripper finger fully open or closed) --
+    otherwise every action would block. A limits tuple whose length doesn't match the joint state
+    fails closed: an earlier version zipped the two, silently leaving any unmatched joints unchecked.
+    """
     for point in trajectory.points:
         robot = point.robot
         if robot is None or robot.joint_position_limits is None:
             return _fail("joint_position_limits_respected", "no joint position limits reported -- default-deny")
-        for j, (pos, (lo, hi)) in enumerate(zip(robot.joint_positions, robot.joint_position_limits)):
+        if len(robot.joint_position_limits) != len(robot.joint_positions):
+            return _fail(
+                "joint_position_limits_respected",
+                f"{len(robot.joint_position_limits)} joint limits reported for {len(robot.joint_positions)} joints -- default-deny",
+            )
+        for j, (pos, limits) in enumerate(zip(robot.joint_positions, robot.joint_position_limits)):
+            if limits is None:
+                continue  # explicitly exempted by the adapter (see docstring)
+            lo, hi = limits
             if _below(pos, lo + safety_margin) or _exceeds(pos, hi - safety_margin):
                 return _fail(
                     "joint_position_limits_respected",
@@ -652,7 +671,9 @@ def cartesian_speed_within_limits(
         if dt <= 0:
             continue
         speed = _distance(prev.swept_volume_center, cur.swept_volume_center) / dt
-        if _exceeds(speed, limit):
+        # exactly-at-rating motion is within limits; the 1e-6 relative slack only absorbs float
+        # round-off in distance/dt (a path at precisely 1.0 m/s computed as 1.0000001)
+        if _exceeds(speed, limit * (1.0 + 1e-6)):
             return _fail(
                 "cartesian_speed_within_limits",
                 f"segment ending t={cur.t:.2f}s at {speed:.2f}m/s exceeds the {limit:.2f}m/s limit",
