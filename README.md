@@ -15,8 +15,11 @@ Full design spec, architecture, worked examples, test/validation record, and roa
 ## Status
 
 Reference implementation, not yet independently assessed. Validated against two robots (a Franka
-Panda arm; an ANYmal-C quadruped) in one simulator (Isaac Lab), with 100 automated
-unit/fuzz/mutation/black-box/stress tests and 7 live hazard-scenario recordings. It has **not**
+Panda arm; an ANYmal-C quadruped) in one simulator (Isaac Lab), with 207 automated
+unit/fuzz/mutation/black-box/stress tests and 7 live hazard-scenario recordings. A third adapter (a
+Unitree G1 humanoid with a dexterous hand) ships with a trained block-stacking policy to gate — see
+[`examples/isaac_lab_g1_stack`](examples/isaac_lab_g1_stack/); gating that policy under injected
+hazards is in progress, not yet a validation result. It has **not**
 been reviewed by a functional-safety assessor
 against IEC 61508, ISO 13849, or ISO 10218/TS 15066 — see the design doc's Scope & Non-Goals
 section for what's out of scope today (joint-space kinematic checks, certified numeric
@@ -29,9 +32,17 @@ evidence, not a certification.
   `SCHEMA_VERSION` tracks this contract specifically; bump it deliberately (see the design doc's
   Version History).
 - `safety_harness/engine.py` — `ActuatorGate.gate()`, the single decision entry point.
-- `safety_harness/preconditions.py` — the registered precondition checks (24 at last count:
-  object/target safety, placement, agent proximity incl. ISO/TS 15066, robot self-limits,
-  environmental signals).
+- `safety_harness/preconditions.py` — the registered precondition checks (31 distinct checks;
+  the registry also keeps `balance_margin_maintained` as a legacy alias of
+  `stability_margin_maintained`): object/target safety, placement, agent proximity incl. ISO/TS
+  15066, vulnerable bystanders, robot self-limits, payload/grip force, stability, perception
+  integrity (sensor freshness, swept-path coverage), decision deadline, command and configuration
+  integrity, environmental signals.
+- `safety_harness/watchdog.py` — `DecisionWatchdog`, an actuator-side dead-man's switch: execute
+  only a PERMIT that is still fresh and bit-identical to what was checked, otherwise freeze.
+- `safety_harness/integrity.py` / `safety_harness/pin.py` — action digests and configuration
+  pinning (`python -m safety_harness.pin configs/example_action_schema.yaml` regenerates the
+  `.sha256`).
 - `safety_harness/action_schema.py` — the YAML-driven registry mapping action types to the checks
   they must pass (`configs/example_action_schema.yaml` is the reference wiring).
 - `tests/` — unit tests, mutation/random-fuzz tests, and reflection-driven black-box contract
@@ -39,7 +50,16 @@ evidence, not a certification.
 
 Robot-specific behavior lives entirely behind four adapter interfaces
 (`PerceptionAdapter`, `DynamicsAdapter`, `FallbackController`, `Logger`) so the engine and checks
-are robot-agnostic. Only an Isaac Lab / Franka adapter exists today.
+are robot-agnostic. Reference adapters exist for three Isaac Lab robots: Franka Panda
+(`adapters/isaac_lab.py`), ANYmal-C (`adapters/isaac_lab_anymal.py`) and Unitree G1
+(`adapters/isaac_lab_g1.py`).
+
+**Not yet independently verified** (deliberately flagged, not buried): the ISO/TS 15066 Table A.2
+body-region force figures, the child clearance and the crowd factors in
+`vulnerable_bystander_protected` are placeholder values that need sign-off from a qualified safety
+engineer before being described as standards-aligned; and `config_integrity_verified` is a
+checksum unless you supply an HMAC key — it catches corruption and uncoordinated edits, not an
+attacker who can rewrite both the config and its pinned hash.
 
 ## Install & test
 
@@ -65,27 +85,31 @@ python -m unittest discover -s tests -p "test_*.py"
 ## Usage
 
 ```python
-from safety_harness import ActionSchemaRegistry, ActuatorGate
+from safety_harness import ActionSchemaRegistry, ActuatorGate, DecisionWatchdog
 from safety_harness.adapters import FreezeInPlaceFallback, InMemoryLogger
 from safety_harness.adapters.isaac_lab import (
     IsaacLabCubeStackPerceptionAdapter,
     IsaacLabCubeStackDynamicsAdapter,
 )
+from safety_harness.integrity import read_digest_file
 
-schema = ActionSchemaRegistry.from_yaml("configs/example_action_schema.yaml")
+cfg = "configs/example_action_schema.yaml"
+# Pin the config to its known-good digest: a registry loaded without one blocks every action
+# (config_integrity_verified), and one whose file doesn't match refuses to construct.
+schema = ActionSchemaRegistry.from_yaml(cfg, expected_digest=read_digest_file(cfg + ".sha256"))
+fallback = FreezeInPlaceFallback()
+watchdog = DecisionWatchdog(fallback, deadline_s=0.2)  # set from your real control cycle
 gate = ActuatorGate(
     perception=IsaacLabCubeStackPerceptionAdapter(...),   # swap for your own stack's adapter
     dynamics=IsaacLabCubeStackDynamicsAdapter(...),
-    fallback=FreezeInPlaceFallback(),
+    fallback=fallback,
     logger=InMemoryLogger(),
-    schema=schema,
+    action_schema=schema,
+    watchdog=watchdog,
 )
 
-decision = gate.gate(proposed_action)  # -> Decision(verdict=PERMIT|BLOCK, ...)
-if decision.verdict.name == "PERMIT":
-    robot.execute(decision.action)
-else:
-    robot.execute(decision.action)  # the fallback action FreezeInPlaceFallback produced
+gate.gate(proposed_action)       # -> Decision(verdict=PERMIT|BLOCK, ...), also fed to the watchdog
+robot.execute(watchdog.command())  # the permitted action only while fresh and bit-identical; else freeze
 ```
 
 Nothing here is Isaac-Lab-specific except the two adapter classes — swap those for adapters

@@ -376,6 +376,49 @@ All three carry the same caveat as the rest of this section: representative lite
 
 **A regulatory category this harness doesn't address at all, flagged rather than solved:** tracking real human positions and logging every decision means this system processes personal data. Data protection law (GDPR, CCPA, and similar) is a genuinely different regulatory axis from safety standards — retention limits, anonymization, consent — and nothing here handles it. A real deployment tracking real people needs this addressed separately from everything in this design doc.
 
+## Next Safety Checks (2026-09-27): Liveness, Perception Integrity, Cyber Integrity, Vulnerable Bystanders
+
+Eight checks from the next-safety-checks roadmap, each written against a concrete unsafe scenario that every existing check PERMITs -- replayed against the unmodified v0.2.x release code before the new check existed, then shown to BLOCK once it's wired. See tests/test\_adversarial\_next\_checks.py (104 tests: gets-past-today, blocked-now, NaN/None/missing fail-closed, and exact boundaries for each).
+
+| Check | Unsafe scenario every existing check permits |
+| --- | --- |
+| `decision_within_deadline` + `DecisionWatchdog` | A decision stalls 0.5s in dynamics and still PERMITs; or gate() hangs/crashes and the last PERMIT never expires. |
+| `payload_and_grip_force_within_limits` | 60N grip on a fragile cube; 1.5kg on a robot rated for 1kg (under the config's flat 3kg budget); 1.5kg held with 10N (slips). |
+| `stability_margin_maintained` | Quadruped CoM statically 8cm inside its support polygon but moving 0.6m/s toward the edge: capture point outside the polygon. |
+| `sensor_data_fresh` | A WorldState assembled just now from a 2-second-old sensor frame. |
+| `swept_path_observed` | Visibility 1.0 and no agents detected -- but the path runs through space no sensor observed. |
+| `command_integrity_verified` | The action's params rewritten during checking (or after PERMIT): the checked command isn't the executed one. |
+| `config_integrity_verified` | The force budget edited 3kg -> 300kg on disk or in memory, or a REGISTRY entry rebound to an always-OK function. |
+| `vulnerable_bystander_protected` | A child 2m from the path; two adults at 1.8m; \~133N contact at an adult's face height (flat 150N limit, ISO/TS 15066 face limit 65N). |
+
+Design choices worth knowing before relying on them:
+
+- **Liveness is two halves.** `decision_within_deadline` catches a decision that finishes late (measured from gate() start on the gate's monotonic clock, not from `WorldState.timestamp`). `DecisionWatchdog` catches one that never finishes: a dead-man's switch on the actuator side that releases a PERMIT only while it is fresh and bit-identical to what was checked, and otherwise returns a freeze -- with an optional monitor thread to actively push a stop. Neither replaces a hardware watchdog timer if the whole process hangs.
+- **Checks can now receive a `CheckContext`** (decision start time, clock, start-of-decision action digest, running registry) -- only checks that declare `wants_check_context`, and never from YAML. It's how the timing and integrity checks see facts no WorldState can carry.
+- **Command integrity is bound, not assumed.** gate() hashes the proposed action before anything runs and binds that digest into `Decision.action_digest`; `integrity.verify_decision_action` (and the watchdog) re-verify at execution. Optional proposer seals (HMAC-keyed) cover the leg before the gate.
+- **Config integrity hashes the *effective* configuration** -- each check's name, the function REGISTRY binds it to, and its code defaults overlaid with YAML kwargs -- so a changed default in code is caught too. The pin lives outside the config (`configs/example_action_schema.yaml.sha256` for the example; regenerate with `python -m safety_harness.pin` after a reviewed change). Unkeyed SHA-256 detects corruption and uncoordinated edits; only an HMAC key held apart from the config makes the pin a signature.
+- **Stability**: `balance_margin_maintained` stays registered as the static-only half of `stability_margin_maintained`, unchanged in behavior. 32 registry names; 31 distinct checks.
+- **Vulnerable bystanders**: ISO/TS 15066's Table A.2 body-region limits apply to adults only; children, animals and unclassified agents get no-contact and a larger clearance. The clearance/crowd numbers are structural placeholders a qualified engineer must set -- the standard has no child or crowd provisions to take them from.
+
+Validated in unit/adversarial/fuzz/black-box tests. The Franka and ANYmal-C reference adapters now report `sensor_timestamp`, `observed_regions`, rated payload and (ANYmal) base velocity as CoM velocity, but those lines haven't been executed against a live environment. The first live contact is the G1 example below. The new checks ran inside a live Isaac Lab control loop and fired, both `swept_path_observed` and `decision_within_deadline`. That was nominal smoke only, not a hazard campaign.
+
+## Unitree G1 Learned-Policy Example (2026-09-27): Gating a Trained Policy, First Findings
+
+A third robot, and the first **learned** policy put behind the gate: a Unitree G1 (fixed base, left arm, 3-finger Dex3 hand) that picks a blue block and stacks it on a red one. Grasping is real contact physics, with no kinematic attach.
+
+The policy is behavior-cloned from a scripted expert and fine-tuned with PPO. It stacks in 82.7% of 1024 randomized episodes when stopped at a strict, sustained, released success. If left running it knocks its own tower down (1/1024 still standing at t = 10 s), so it is not yet a robust policy. Full results, reproduction steps and the task/scripts/checkpoints are in `examples/isaac_lab_g1_stack/`.
+
+The harness-side findings from the first nominal gating runs are the part that matters here. Each is a property of running this harness around *any* continuous policy, not a G1 quirk:
+
+- **Decisions must be segmented, not sampled.** Gating `grasp` on every control step while the grip closes deadlocked the policy (3,838 blocks in one run). Mid-grasp, the object moves in the fingers and is never "confirmed stable". Edge-triggered segmentation fixes the deadlock: `grasp` on the closing edge, `place` on the opening edge, `reach` otherwise. Integrators need guidance on this, and it should arguably be a first-class concept in the Action schema.
+- **`swept_path_observed` needs known-solid space.** With the observed region set to the tabletop volume a camera would realistically see, it blocked ~98% of nominal near-table reaches. The margin sphere around any near-table path dips under the tabletop, which is unobservable but also physically unoccupiable. The G1 adapter declares the whole privileged-sim volume observed, which is honest for simulation only. Real perception needs an "occupied/solid" region type the check can subtract.
+- **Nominal false blocks remain and must reach ~0 before any hazard result means anything.**
+  - Grasp onsets are still sometimes blocked by `current_position_confirmed_stable`.
+  - Nominal places are blocked by `destination_confirmed_stable_and_clear`, likely because it counts the held object itself as destination clutter.
+- **One `decision_within_deadline` block per run** came from the first gate() call's Python warm-up. That is a real reason to measure and budget first-call latency on a live robot.
+
+The hazard campaign is wired but not yet run: adult hand, child bystander, 5 kg object, SHARP tag, NaN pose, low visibility, stale sensor data, occluded or unstable destination, command tamper and config tamper, each gated vs ungated. It is next, after the nominal false-block issues above.
+
 ## Part 7 — Roadmap, Compliance & Change Log
 
 What's next, the commercialization case, prior art, and the version history.
@@ -451,5 +494,7 @@ Open questions this design doesn't resolve:
 | 0.2.0 (release model) | Release & Distribution decision: Apache License 2.0 for the engine, adapter interfaces, and conformance suite; monetization moved from per-implementation licensing to certification/audit services and enterprise support. LICENSE, NOTICE, pyproject.toml, and README.md added to the repo. Published as of 2026-09-27: github.com/naganumakr/safety-harness (public, CI green) and PyPI (safety-harness, through 0.2.2). |
 | 0.2.0 (adversarial stress-test pass, 2026-09-27) | NaN-sensor stress test found a systemic default-deny bypass: comparison-based checks ("<"/">" against a sensor float) silently pass on NaN. Confirmed standalone in mass\_within\_force\_budget; confirmed on the confidence field in object\_hazard\_confirmed/object\_pose\_confirmed; confirmed compound (full gate() PERMIT next to an under-tracked agent) via swept\_path\_clear\_of\_agents + iso15066\_separation\_distance\_maintained + iso15066\_power\_force\_limiting's own related bug; confirmed latent in balance\_margin\_maintained. Fixed in preconditions.py, validated locally/remote-Python/live-Isaac-Sim, and released as v0.2.2 (PyPI + GitHub). See tests/test\_adversarial\_stress.py and the section above. |
 | 0.2.x (second-adapter pass, 2026-09-27) | Development Roadmap stage 4: a second adapter (ANYmal-C, Isaac Lab navigation task) against a genuinely different robot -- a moving base, not a fixed arm. New \`navigate\` action type wires balance\_margin\_maintained for the first time. That activation found and fixed a real bug in \_distance\_to\_polygon\_edge (nearest-vertex distance grew, rather than shrank, once a point moved outside the polygon -- replaced with a proper signed convex-hull distance). Also documented a real naming finding: the base's pose is reported through RobotProprioception.end\_effector\_pose, since no less Franka-specific field exists -- flagged as a follow-up, not fixed here. Verified locally, on the GPU box's own Python, and against a live running Isaac-Navigation-Flat-Anymal-C-v0 environment. See tests/test\_anymal\_adapter.py. |
+| 0.3.0 (G1 learned-policy example, 2026-09-27) | Third reference adapter (Unitree G1) brought to schema 0.3.0. All three Isaac Lab adapters now convert quaternions from Isaac Lab 3.x's (x, y, z, w) to the schema's `orientation_wxyz`; they had passed them through unconverted. No check reads orientation yet, so no decision was affected. Added `examples/isaac_lab_g1_stack/`: a GPU-trainable G1 stacking task, scripted experts, BC→PPO training, trained checkpoints and a gating driver. First nominal gating findings are in the section above. |
+| 0.3.0 (next safety checks, 2026-09-27) | `SCHEMA_VERSION` 0.2.0 -> 0.3.0 (additive, default-deny fields: `WorldState.sensor_timestamp`/`observed_regions`, `ObservedRegion`, `TrackedAgent.category`/`stature_m`, `AgentCategory`, `TrackedObject.max_safe_grip_force_n`, `RobotProprioception.rated_payload_kg`/`center_of_mass_velocity`, `Decision.action_digest`). Eight new checks, `DecisionWatchdog`, integrity module, config pinning -- see "Next Safety Checks" above. Unit/adversarial-tested only; not yet live-validated. |
 
 The code's `SCHEMA_VERSION` constant (`safety_harness/schema.py`) tracks the data contract specifically; this table tracks the whole system. They're expected to move together but aren't the same axis — tightening an existing threshold doesn't need a schema bump, but adding or removing a dataclass field does.
