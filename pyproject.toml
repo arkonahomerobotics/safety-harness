@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "safety-harness"
-version = "0.2.2"
-description = "Default-deny precondition gate for physical AI actuators: permission, not detection."
+version = "0.2.3"
+description = "A perception-grounded safety harness for physical AI: default-deny precondition gate for actuators, permission not detection."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.9"
