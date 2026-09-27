@@ -14,9 +14,10 @@ Full design spec, architecture, worked examples, test/validation record, and roa
 
 ## Status
 
-Reference implementation, not yet independently assessed. Validated against one robot (a Franka
-Panda arm) in one simulator (Isaac Lab), with 92 automated unit/fuzz/mutation/black-box/stress
-tests and 7 live hazard-scenario recordings. It has **not** been reviewed by a functional-safety assessor
+Reference implementation, not yet independently assessed. Validated against two robots (a Franka
+Panda arm; an ANYmal-C quadruped) in one simulator (Isaac Lab), with 100 automated
+unit/fuzz/mutation/black-box/stress tests and 7 live hazard-scenario recordings. It has **not**
+been reviewed by a functional-safety assessor
 against IEC 61508, ISO 13849, or ISO 10218/TS 15066 — see the design doc's Scope & Non-Goals
 section for what's out of scope today (joint-space kinematic checks, certified numeric
 thresholds, data-protection handling of logged human-position data). Treat this as engineering
