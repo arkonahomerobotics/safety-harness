@@ -23,7 +23,7 @@ ANYmal-C quadruped:
   wired into the example config;
 - see the design doc's "Live Re-validation of the Wired Set" for the per-check record.
 
-Plus 227 automated unit/fuzz/mutation/black-box/stress tests. A third adapter (a
+Plus 239 automated unit/fuzz/mutation/black-box/stress tests. A third adapter (a
 Unitree G1 humanoid with a dexterous hand) ships with a trained block-stacking policy to gate — see
 [`examples/isaac_lab_g1_stack`](examples/isaac_lab_g1_stack/); gating that policy under injected
 hazards is in progress, not yet a validation result. It has **not**
@@ -39,9 +39,10 @@ evidence, not a certification.
   `SCHEMA_VERSION` tracks this contract specifically; bump it deliberately (see the design doc's
   Version History).
 - `safety_harness/engine.py` — `ActuatorGate.gate()`, the single decision entry point.
-- `safety_harness/preconditions.py` — the registered precondition checks (31 distinct checks;
-  the registry also keeps `balance_margin_maintained` as a legacy alias of
-  `stability_margin_maintained`): object/target safety, placement, agent proximity incl. ISO/TS
+- `safety_harness/preconditions.py` — the registered precondition checks (31 distinct checks,
+  one of which, `surface_confirmed_stable`, is deprecated in favor of
+  `destination_confirmed_stable_and_clear`; the registry also keeps `balance_margin_maintained`
+  as a legacy alias of `stability_margin_maintained`): object/target safety, placement, agent proximity incl. ISO/TS
   15066, vulnerable bystanders, robot self-limits, payload/grip force, stability, perception
   integrity (sensor freshness, swept-path coverage), decision deadline, command and configuration
   integrity, environmental signals.
