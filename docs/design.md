@@ -231,13 +231,17 @@ Package this as a small library with a narrow public surface: one shared data sc
 **The integration itself, in an existing control loop:**
 
 ```
+# since 0.3.0 the config is pinned to a known-good digest kept outside it; an unpinned registry
+# blocks every action (config_integrity_verified)
+schema = ActionSchemaRegistry.from_yaml("config.yaml", expected_digest=read_digest_file("config.yaml.sha256"))
+watchdog = DecisionWatchdog(fallback_controller, deadline_s=control_cycle_s)
 harness = ActuatorGate(perception_adapter, dynamics_adapter,
                         fallback_controller, logger,
-                        action_schema="config.yaml")
+                        action_schema=schema, watchdog=watchdog)
 
 # the one line inserted before any action reaches actuators
-decision = harness.gate(proposed_action)
-execute(decision.action)  # the original action, or the fallback
+harness.gate(proposed_action)
+execute(watchdog.command())  # the permitted action while fresh and bit-identical to what was checked; else freeze
 ```
 
 **Distribution choices that keep it portable across stacks, not just one robot:**
@@ -269,10 +273,10 @@ In every row, the adapter's job ends at producing a `WorldState`, a `PredictedTr
 1. Install the core library and, if applicable, the stack-specific wrapper package — for example the ROS2 wrapper — alongside your existing robot code. No change to existing code is required at this step.
 2. Implement `PerceptionAdapter.get_world_state()` against whatever perception your robot already runs. Start narrow: a stub returning only proprioceptive state, with no object or human tracking yet, is enough to bring the engine up.
 3. Implement `DynamicsAdapter.predict_trajectory()` against your existing kinematics or physics model.
-4. Write an `action_schema.yaml` covering just one action type to start — the one you consider lowest-risk — referencing the built-in precondition checks by name.
+4. Write an `action_schema.yaml` covering just one action type to start — the one you consider lowest-risk — referencing the built-in precondition checks by name. Pin it: `python -m safety_harness.pin action_schema.yaml` writes the `.sha256` you load it with (`expected_digest=`); since 0.3.0 an unpinned configuration blocks every action. Re-pin only after a reviewed change.
 5. Implement `FallbackController.execute()`. For a first integration, "freeze in place" is enough if your platform is fixed-base or currently in a stable stance.
 6. Run the conformance test suite against your adapters before wiring anything to actuators. Fix whatever it flags first.
-7. Wire `harness.gate()` in front of that one action type only, with logging on, and watch the decision log before trusting it — in simulation first, then on hardware with a supervised kill switch, before adding more action types.
+7. Wire `harness.gate()` in front of that one action type only — executing through `DecisionWatchdog.command()` (or `verify_decision_action()`), never the proposal directly — with logging on, and watch the decision log before trusting it — in simulation first, then on hardware with a supervised kill switch, before adding more action types.
 
 Never wire all action types at once on a first integration. One type, watched closely, first.
 
@@ -327,7 +331,7 @@ Every numeric precondition in `preconditions.py` enforces default-deny through a
 - **`mass_within_force_budget` -- confirmed, standalone.** `obj.estimated_mass_kg = nan` makes `gate()` PERMIT a grasp of an object whose mass was never actually measured. Nothing else registered for `grasp` looks at mass at all, so this is its only guard and there is no second check to catch what it misses.
 - **`object_hazard_confirmed` / `object_pose_confirmed` -- the confidence field itself, not just position.** A NaN `class_confidence` or NaN `pose_confidence` both bypass their respective confidence gates (`< min_confidence` is `False` for NaN) the same way a NaN *position* did before the existing fix -- that fix cross-checked position against `math.isfinite`, but nothing cross-checks the confidence score itself the same way.
 - **Compound: a single NaN agent-position coordinate defeats `swept_path_clear_of_agents` and `iso15066_separation_distance_maintained` simultaneously** -- both individually confirmed reporting `satisfied=True` on it. For a standard-speed human (1.5 m/s) the overall decision still blocks, but only because `iso15066_power_force_limiting`'s force estimate exceeds 150N at that speed regardless of true distance, not because that check is immune to the same bug: its own "too far to matter, skip" gate (`d > 0.3m`) is defeated by the same NaN in the *opposite* direction (it stops skipping instead of stops blocking). Swap in a slower-moving tracked agent (0.15 m/s -- a mobile-base teammate, not a pedestrian) and the coincidence disappears: `gate()` fully PERMITs a grasp passing 0.19m from that agent -- inside the ISO/TS 15066 separation distance -- with every registered check reporting satisfied.
-- **`balance_margin_maintained` -- same pattern, latent.** Not wired into the example `grasp`/`place`/`reach` schema today (no legged platform in this reference config), so it can't be reached through `gate()` yet, but a NaN center-of-mass component defeats it directly at the function level the same way -- worth fixing before any humanoid/legged adapter registers it, not after.
+- **`balance_margin_maintained` -- same pattern, latent.** Not wired into the example `grasp`/`place`/`reach` schema at the time (no legged platform in that reference config; the later `navigate` action type wires it, now as `stability_margin_maintained`), so it couldn't be reached through `gate()` then, but a NaN center-of-mass component defeats it directly at the function level the same way -- worth fixing before any humanoid/legged adapter registers it, not after.
 
 **The root cause is one line, repeated across most of the file.** Each check above writes its guard as `if measured_value < threshold: fail()` and trusts that a corrupted or never-actually-measured value lands on the failing side. NaN doesn't -- it fails every comparison, in both directions, which is exactly backwards from what a default-deny gate needs. The fix isn't per-check; it's one shared primitive (treat any comparison operand that fails `math.isfinite` as an automatic, explicit fail, before the numeric comparison runs at all) applied everywhere a sensor-derived float currently flows straight into `<`/`>`. Not applied yet -- this pass found and reproduced the gap, it didn't patch it.
 
@@ -463,7 +467,7 @@ This has not been checked against the market: no review yet of existing competit
 **Publishing mechanics, in order:**
 
 1. Public GitHub repo: github.com/naganumakr/safety-harness (done).
-2. PyPI package: safety-harness, through 0.2.2 (done -- published via the repo's Trusted Publisher workflow on each tagged GitHub Release).
+2. PyPI package: safety-harness, through 0.3.0 (done -- published via the repo's Trusted Publisher workflow on each tagged GitHub Release).
 3. A published "certified adapters" registry: any robot maker's adapter that passes the black-box + fuzz suites unmodified gets listed — this is the actual "integrated into every robot's code" path, since it doesn't require them to fork or relicense anything.
 4. Independent functional-safety assessment (see Scope & Non-Goals) before calling any of this "certified" rather than "reference implementation" — publishing the code doesn't substitute for this, and claiming compliance without it is the fastest way to lose the trust this whole strategy depends on.
 
@@ -490,7 +494,7 @@ Open questions this design doesn't resolve:
 | --- | --- |
 | 0.1.0 | Initial data contract and engine: `WorldState`/`Action`/`Decision`, default-deny `ActuatorGate.gate()`, the four adapter interfaces, first precondition checks (object pose/hazard/clearance, swept-path-vs-agents, visibility). |
 | 0.1.x (unreleased, built up this session) | Object & placement safety fields and checks (`fall_consequence`, `drop_tolerance_m`, `supported_stably`, destination-clearance). Robot self-limit fields (joint position/velocity/effort limits, motor temperature, cartesian speed cap, battery charge fraction) and the 6 kinematic/electrical/balance checks plus 1 battery check — registered, not yet wired into the example schema (see Scope & Non-Goals). ISO/TS 15066 separation-distance and power-force-limiting checks, plus reduced-speed-near-human. Environmental checks: visibility, surface hazards, multi-agent human + pet scenarios. Mutation, random-fuzz, pathological-input, and reflection-driven black-box contract test suites. Live Isaac Lab validation, 7 hazard-scenario videos, 5 environmental/regulatory hazard videos. |
-| 0.2.0 (this revision) | `SCHEMA_VERSION` bumped from 0.1.0 — the constant had not been incremented despite everything added above. Document reorganized into this product-spec-sheet structure; added Scope & Non-Goals, Worked Examples, and this Version History. |
+| 0.2.0 | `SCHEMA_VERSION` bumped from 0.1.0 — the constant had not been incremented despite everything added above. Document reorganized into this product-spec-sheet structure; added Scope & Non-Goals, Worked Examples, and this Version History. |
 | 0.2.0 (release model) | Release & Distribution decision: Apache License 2.0 for the engine, adapter interfaces, and conformance suite; monetization moved from per-implementation licensing to certification/audit services and enterprise support. LICENSE, NOTICE, pyproject.toml, and README.md added to the repo. Published as of 2026-09-27: github.com/naganumakr/safety-harness (public, CI green) and PyPI (safety-harness, through 0.2.2). |
 | 0.2.0 (adversarial stress-test pass, 2026-09-27) | NaN-sensor stress test found a systemic default-deny bypass: comparison-based checks ("<"/">" against a sensor float) silently pass on NaN. Confirmed standalone in mass\_within\_force\_budget; confirmed on the confidence field in object\_hazard\_confirmed/object\_pose\_confirmed; confirmed compound (full gate() PERMIT next to an under-tracked agent) via swept\_path\_clear\_of\_agents + iso15066\_separation\_distance\_maintained + iso15066\_power\_force\_limiting's own related bug; confirmed latent in balance\_margin\_maintained. Fixed in preconditions.py, validated locally/remote-Python/live-Isaac-Sim, and released as v0.2.2 (PyPI + GitHub). See tests/test\_adversarial\_stress.py and the section above. |
 | 0.2.x (second-adapter pass, 2026-09-27) | Development Roadmap stage 4: a second adapter (ANYmal-C, Isaac Lab navigation task) against a genuinely different robot -- a moving base, not a fixed arm. New \`navigate\` action type wires balance\_margin\_maintained for the first time. That activation found and fixed a real bug in \_distance\_to\_polygon\_edge (nearest-vertex distance grew, rather than shrank, once a point moved outside the polygon -- replaced with a proper signed convex-hull distance). Also documented a real naming finding: the base's pose is reported through RobotProprioception.end\_effector\_pose, since no less Franka-specific field exists -- flagged as a follow-up, not fixed here. Verified locally, on the GPU box's own Python, and against a live running Isaac-Navigation-Flat-Anymal-C-v0 environment. See tests/test\_anymal\_adapter.py. |
