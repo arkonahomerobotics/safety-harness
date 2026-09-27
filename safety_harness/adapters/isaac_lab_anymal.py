@@ -30,16 +30,19 @@ doc's Live Validation Results for exactly what was run and what wasn't.
 from __future__ import annotations
 
 import math
+import time
 
 from ..schema import (
     Action,
     EnvironmentSignals,
+    ObservedRegion,
     Pose,
     PredictedTrajectory,
     RobotProprioception,
     TrajectoryPoint,
     WorldState,
 )
+from ._isaac_lab_common import quat_xyzw_to_wxyz
 from .base import DynamicsAdapter, PerceptionAdapter
 
 # ANYmal-C's four foot body names, in this task's fixed body ordering (LF/LH/RF/RH = left-front,
@@ -54,6 +57,11 @@ FOOT_BODY_NAMES = ("LF_FOOT", "LH_FOOT", "RF_FOOT", "RH_FOOT")
 BODY_FOOTPRINT_RADIUS_M = 0.35
 
 DEFAULT_MAX_BASE_SPEED_MPS = 1.0  # ANYmal-C's typical commanded walking speed; conservative vs. its rated max
+
+# Privileged simulator state is omniscient -- see isaac_lab.py's PRIVILEGED_STATE_OBSERVED_REGION for
+# why the whole env-local area counts as observed here and why a real sensor adapter must not copy
+# this. Larger than the Franka box: navigation goals are meters away, not centimeters.
+PRIVILEGED_STATE_OBSERVED_REGION = ObservedRegion(min_corner=(-20.0, -20.0, -1.0), max_corner=(20.0, 20.0, 3.0))
 
 
 class IsaacLabAnymalNavPerceptionAdapter(PerceptionAdapter):
@@ -70,13 +78,18 @@ class IsaacLabAnymalNavPerceptionAdapter(PerceptionAdapter):
         self._foot_ids = foot_ids
 
     def get_world_state(self) -> WorldState:
+        sensor_timestamp = time.time()  # synchronous privileged read: capture time = read start
         env = self._env
         i = self._env_index
         origin = env.scene.env_origins[i]
         robot = env.scene["robot"]
 
         base_pos = (robot.data.root_pos_w.torch[i] - origin).tolist()
-        base_quat = robot.data.root_quat_w.torch[i].tolist()  # (w, x, y, z)
+        # Base linear velocity stands in for center-of-mass velocity, the same documented
+        # simplification as base position for center of mass below; feeds the capture-point half of
+        # stability_margin_maintained. Same data field the Franka adapter reads for its cubes.
+        base_vel = robot.data.root_lin_vel_w.torch[i].tolist()
+        base_quat = quat_xyzw_to_wxyz(robot.data.root_quat_w.torch[i].tolist())  # Isaac Lab 3.x stores (x, y, z, w)
         joint_pos = robot.data.joint_pos.torch[i].tolist()
         joint_vel = robot.data.joint_vel.torch[i].tolist()
 
@@ -100,6 +113,7 @@ class IsaacLabAnymalNavPerceptionAdapter(PerceptionAdapter):
             # docstring uses for the support-polygon distance calculation itself.
             center_of_mass=tuple(base_pos),
             support_polygon=support_polygon,
+            center_of_mass_velocity=tuple(base_vel),
         )
 
         return WorldState(
@@ -107,6 +121,8 @@ class IsaacLabAnymalNavPerceptionAdapter(PerceptionAdapter):
             agents=(),  # no humans/agents tracked by this task's own perception; inject via a wrapper adapter
             robot=robot_state,
             environment=EnvironmentSignals(visibility_confidence=1.0),
+            sensor_timestamp=sensor_timestamp,
+            observed_regions=(PRIVILEGED_STATE_OBSERVED_REGION,),
         )
 
 

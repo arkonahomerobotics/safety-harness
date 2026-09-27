@@ -13,7 +13,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
-SCHEMA_VERSION = "0.2.0"
+# 0.3.0: additive only -- every field added below defaults to "unreported", which every check that
+# reads it treats as default-deny, so an adapter written against 0.2.0 still constructs valid
+# objects; it just can't PERMIT through a check that needs the new evidence until it reports it.
+SCHEMA_VERSION = "0.3.0"
 
 
 class HazardTag(str, Enum):
@@ -35,6 +38,18 @@ class FallConsequence(str, Enum):
     MESS = "mess"  # breaks or spills, but nothing hazardous released
     HAZARDOUS_RELEASE = "hazardous_release"  # breaking releases something dangerous (sharp, chemical, biohazard)
     UNKNOWN = "unknown"  # the default -- unconfirmed, treated as the most restrictive assumption
+
+
+class AgentCategory(str, Enum):
+    """Who a tracked agent is, as far as contact limits are concerned -- ISO/TS 15066's biomechanical
+    limits were derived for adult workers and say nothing about anyone else (see
+    ``vulnerable_bystander_protected`` in preconditions.py). Unconfirmed defaults to UNKNOWN, which
+    that check treats exactly like CHILD: the most restrictive assumption, never "probably an adult"."""
+
+    ADULT = "adult"
+    CHILD = "child"
+    ANIMAL = "animal"
+    UNKNOWN = "unknown"  # the default -- treated as the most restrictive assumption downstream
 
 
 class DecisionVerdict(str, Enum):
@@ -75,6 +90,10 @@ class TrackedObject:
     # Max fall height this object tolerates without breaking/releasing a hazard. None = unconfirmed;
     # treated as 0.0 (no lift height is acceptable) whenever fall_consequence != NONE.
     drop_tolerance_m: Optional[float] = None
+    # Object-specific crush limit, if perception or an object database knows one (a paper cup, an
+    # egg). None = no object-specific figure; payload_and_grip_force_within_limits then falls back to
+    # its hazard-tag-based cap alone. A reported value can only ever lower that cap, never raise it.
+    max_safe_grip_force_n: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +106,12 @@ class TrackedAgent:
     time_since_confirmed_s: float = 0.0
     tracking_confidence: float = 0.0
     worst_case_speed_mps: float = 1.5  # conservative human walking speed unless perception says otherwise
+    # Adult / child / animal, per ISO/TS 15066's adult-only body model -- UNKNOWN (the default) is
+    # treated as CHILD by vulnerable_bystander_protected, never as ADULT.
+    category: AgentCategory = AgentCategory.UNKNOWN
+    # Estimated standing height; decides which ISO/TS 15066 body regions sit at the height the robot
+    # sweeps through. None = unknown -> every body region is assumed reachable (the face included).
+    stature_m: Optional[float] = None
 
     def worst_case_radius_m(self, horizon_s: float) -> float:
         """How far this agent could plausibly be by ``horizon_s`` from now, given tracking staleness."""
@@ -113,6 +138,11 @@ class RobotProprioception:
     motor_temperature_limit_c: Optional[tuple] = None  # safe upper bound per joint
     max_cartesian_speed_mps: Optional[float] = None  # this platform's end-effector speed limit
     battery_charge_fraction: Optional[float] = None  # [0, 1] current state of charge; None = not battery-powered or unreported
+    rated_payload_kg: Optional[float] = None  # datasheet payload rating; None = unreported (see payload_and_grip_force_within_limits)
+    # Horizontal-plane velocity of center_of_mass, legged/humanoid/mobile only. Needed for a dynamic
+    # (capture-point) stability margin rather than a purely static one -- see
+    # stability_margin_maintained. None = unreported, which that check default-denies.
+    center_of_mass_velocity: Optional[tuple[float, float, float]] = None
 
 
 @dataclass(frozen=True)
@@ -122,13 +152,36 @@ class EnvironmentSignals:
 
 
 @dataclass(frozen=True)
+class ObservedRegion:
+    """An axis-aligned box of space that perception *actually observed* when building this
+    WorldState -- in line of sight of a sensor that returned data, not merely inside some sensor's
+    nominal range. Coverage, not confidence: a region can be observed and still uncertain (that's
+    visibility_confidence / per-track confidence), and an unobserved region carries no evidence at
+    all -- "no agent tracked there" means nothing about a place no sensor looked at. See
+    swept_path_observed."""
+
+    min_corner: tuple[float, float, float]
+    max_corner: tuple[float, float, float]
+
+
+@dataclass(frozen=True)
 class WorldState:
     objects: tuple = ()
     agents: tuple = ()
     robot: Optional[RobotProprioception] = None
     environment: EnvironmentSignals = field(default_factory=EnvironmentSignals)
     schema_version: str = SCHEMA_VERSION
+    # When this WorldState object was *assembled* (time.time()). Not when the underlying sensor data
+    # was captured -- a state assembled just now from a 2-second-old camera frame still gets a fresh
+    # value here, which is exactly why sensor_timestamp below exists separately.
     timestamp: float = field(default_factory=time.time)
+    # Wall-clock (time.time() epoch) capture time of the OLDEST sensor reading this state was built
+    # from. None = unreported, which sensor_data_fresh default-denies: there is no default here that
+    # could make a state look fresh on an adapter's behalf.
+    sensor_timestamp: Optional[float] = None
+    # Every region perception actually observed this cycle, as ObservedRegion boxes. None =
+    # coverage unreported; () = nothing observed. Both default-deny in swept_path_observed.
+    observed_regions: Optional[tuple] = None
 
 
 @dataclass(frozen=True)
@@ -168,3 +221,9 @@ class Decision:
     action: Action  # the action to actually execute: original if PERMIT, fallback's if BLOCK
     precondition_results: tuple = ()
     triggered_fallback: bool = False
+    # Digest (integrity.action_digest) of ``action`` taken at the moment it was checked -- for a
+    # PERMIT, when gate() began, before perception, dynamics or any check ran. The executor recomputes
+    # it right before actuation (integrity.verify_decision_action, or DecisionWatchdog.command()) so
+    # the action that reaches actuators is provably bit-identical to the one that was checked. None =
+    # the action could not be canonically encoded, which every execution-side verifier refuses.
+    action_digest: Optional[str] = None

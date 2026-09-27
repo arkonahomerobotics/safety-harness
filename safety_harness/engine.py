@@ -7,8 +7,13 @@ is the one piece of the module a robot team configures (via the action schema) b
 
 from __future__ import annotations
 
+import time
+from typing import Callable, Optional
+
 from .action_schema import ActionSchemaRegistry
 from .adapters.base import DynamicsAdapter, FallbackController, Logger, PerceptionAdapter
+from .integrity import try_action_digest
+from .preconditions import CheckContext
 from .schema import Action, Decision, DecisionVerdict, PreconditionResult
 
 
@@ -32,13 +37,23 @@ class ActuatorGate:
         logger: Logger,
         action_schema: ActionSchemaRegistry,
         horizon_s: float = 1.0,
+        watchdog=None,
+        clock: Optional[Callable[[], float]] = None,
     ):
+        """``watchdog`` (optional, a watchdog.DecisionWatchdog) is fed every decision and revoked
+        on PerceptionFailure; the actuator side then executes only what ``watchdog.command()``
+        returns. ``clock`` is the monotonic clock decisions are timed on -- the watchdog's own clock
+        when one is given (they must agree), time.monotonic otherwise."""
         self._perception = perception
         self._dynamics = dynamics
         self._fallback = fallback
         self._logger = logger
         self._schema = action_schema
         self._horizon_s = horizon_s
+        self._watchdog = watchdog
+        if clock is None:
+            clock = watchdog.now if watchdog is not None else time.monotonic
+        self._clock = clock
 
     def gate(self, proposed_action: Action) -> Decision:
         """The one call a robot's control loop inserts before any action reaches actuators.
@@ -48,10 +63,20 @@ class ActuatorGate:
         precondition checks) happens with valid state in hand, so it degrades to a normal, safely
         logged BLOCK instead: default-deny extends to "the harness couldn't evaluate this," not only
         to "the harness evaluated this and it failed."
+
+        Before anything else runs, gate() stamps the decision's start time and hashes the proposed
+        action. Both go to the checks through a CheckContext (decision_within_deadline,
+        command_integrity_verified), and the hash is bound into the returned Decision as
+        ``action_digest``, so the executor can prove the action it's about to send is the one that
+        was checked (integrity.verify_decision_action).
         """
+        started_at = self._clock()
+        checked_digest = try_action_digest(proposed_action)
         try:
             state = self._perception.get_world_state()
         except Exception as exc:
+            if self._watchdog is not None:
+                self._watchdog.revoke(f"perception failure: {exc}")
             raise PerceptionFailure(str(exc)) from exc
 
         try:
@@ -67,7 +92,11 @@ class ActuatorGate:
                     reason="dynamics adapter returned an empty trajectory",
                 ),)
             else:
-                results = self._schema.run_checks(proposed_action, state, trajectory)
+                context = CheckContext(
+                    decision_started_at=started_at, clock=self._clock,
+                    checked_action_digest=checked_digest, schema_registry=self._schema,
+                )
+                results = self._schema.run_checks(proposed_action, state, trajectory, context=context)
         except Exception as exc:
             results = (PreconditionResult(name="adapter_error", satisfied=False, reason=str(exc)),)
 
@@ -77,6 +106,9 @@ class ActuatorGate:
                 action=proposed_action,
                 precondition_results=results,
                 triggered_fallback=False,
+                # The digest from BEFORE any check ran, not a fresh one: if the action was rewritten
+                # during checking, execution-time verification must fail, not bless the rewrite.
+                action_digest=checked_digest,
             )
         else:
             fallback_action = self._fallback.execute(state)
@@ -85,7 +117,10 @@ class ActuatorGate:
                 action=fallback_action,
                 precondition_results=results,
                 triggered_fallback=True,
+                action_digest=try_action_digest(fallback_action),
             )
 
         self._logger.record(decision, state)
+        if self._watchdog is not None:
+            self._watchdog.feed(decision, state, decided_at=started_at)
         return decision

@@ -15,6 +15,7 @@ import math
 import os
 import random
 import sys
+import time
 import unittest
 from dataclasses import replace
 
@@ -27,9 +28,11 @@ from safety_harness.adapters import FreezeInPlaceFallback, InMemoryLogger  # noq
 from safety_harness.adapters.base import DynamicsAdapter, PerceptionAdapter  # noqa: E402
 from safety_harness.schema import (  # noqa: E402
     Action,
+    AgentCategory,
     EnvironmentSignals,
     FallConsequence,
     HazardTag,
+    ObservedRegion,
     Pose,
     PredictedTrajectory,
     PreconditionResult,
@@ -41,6 +44,25 @@ from safety_harness.schema import (  # noqa: E402
 )
 
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "example_action_schema.yaml")
+# The example config now carries config_integrity_verified, which blocks every action unless the
+# registry is pinned to a known-good digest. Pinned here to the file's own current digest, so these
+# tests keep exercising everything else; whether that digest matches the *committed* pin is a
+# separate question, answered by test_adversarial_next_checks's drift test.
+PINNED_DIGEST = ActionSchemaRegistry.from_yaml(SCHEMA_PATH).config_digest()
+
+
+class _SteppingClock:
+    """A monotonic clock that advances ``step_s`` on every read -- a decision stalled between
+    gate() starting and decision_within_deadline running, without actually sleeping."""
+
+    def __init__(self, step_s):
+        self._t = 1000.0
+        self._step = step_s
+
+    def __call__(self):
+        t = self._t
+        self._t += self._step
+        return t
 
 
 class _StubPerception(PerceptionAdapter):
@@ -59,14 +81,20 @@ class _StubDynamics(DynamicsAdapter):
         return self._trajectory
 
 
-def gate_for(state, trajectory=None):
+def gate_for(state, trajectory=None, expected_digest=PINNED_DIGEST, clock=None):
     trajectory = trajectory or fixtures.straight_line_trajectory()
+    registry = ActionSchemaRegistry.from_yaml(SCHEMA_PATH)
+    # Pinned after loading (not via from_yaml(expected_digest=...), which would raise on a wrong
+    # pin): the fuzz loops below deliberately pin a wrong digest sometimes, to reach the per-decision
+    # failure path of config_integrity_verified rather than the load-time refusal.
+    registry._expected_digest = expected_digest
     return ActuatorGate(
         perception=_StubPerception(state),
         dynamics=_StubDynamics(trajectory),
         fallback=FreezeInPlaceFallback(),
         logger=InMemoryLogger(),
-        action_schema=ActionSchemaRegistry.from_yaml(SCHEMA_PATH),
+        action_schema=registry,
+        clock=clock,
     )
 
 
@@ -218,6 +246,8 @@ class RandomFuzzTests(unittest.TestCase):
                 tracking_confidence=rng.choice([0.0, rng.random(), 1.0]),
                 time_since_confirmed_s=rng.uniform(0, 10),
                 worst_case_speed_mps=rng.uniform(0.1, 3.0),
+                category=rng.choice(list(AgentCategory)),
+                stature_m=rng.choice([None, 1.2, 1.75]),
             )
             for k in range(n_agents)
         )
@@ -230,13 +260,43 @@ class RandomFuzzTests(unittest.TestCase):
             if rng.random() < 0.3
             else frozenset()
         )
+        # Sensor capture time and observed coverage (sensor_data_fresh / swept_path_observed):
+        # mostly fresh and covering the fixed trajectory's workspace, sometimes stale, unreported,
+        # or observed only somewhere the path doesn't go.
+        now = time.time()
+        sensor_timestamp = rng.choice([now, now, now, now - 5.0, None])
+        observed_regions = rng.choice([
+            fixtures.WORKSPACE_OBSERVED, fixtures.WORKSPACE_OBSERVED, fixtures.WORKSPACE_OBSERVED,
+            None, (ObservedRegion(min_corner=(3.0, 3.0, 0.0), max_corner=(4.0, 4.0, 1.0)),),
+        ])
         return WorldState(
             objects=objects, agents=agents, robot=robot,
             environment=EnvironmentSignals(
                 visibility_confidence=rng.choice([0.0, rng.random(), 1.0]),
                 surface_hazards=surface_hazards,
             ),
+            sensor_timestamp=sensor_timestamp,
+            observed_regions=observed_regions,
         )
+
+    def _random_grasp(self, rng, target_id):
+        # A commanded grip force (payload_and_grip_force_within_limits) that is sometimes safe,
+        # sometimes crushing, sometimes missing -- and occasionally a corrupted command seal
+        # (command_integrity_verified verifies any seal that is present).
+        params = {"object_id": target_id, "target_position": (0.5, 0, 0.05)}
+        grip = rng.choice([fixtures.SAFE_GRIP_FORCE_N, fixtures.SAFE_GRIP_FORCE_N, 60.0, None])
+        if grip is not None:
+            params["grip_force_n"] = grip
+        if rng.random() < 0.15:
+            params["command_digest"] = "sha256:" + "0" * 64
+        return Action(action_type="grasp", params=params)
+
+    def _random_gate(self, rng, state):
+        # Sometimes a tampered config (wrong pin) and sometimes a stalled decision (a clock that
+        # jumps 0.25s between gate() starting and decision_within_deadline running).
+        expected = PINNED_DIGEST if rng.random() < 0.85 else "sha256:" + "f" * 64
+        clock = _SteppingClock(0.25) if rng.random() < 0.15 else None
+        return gate_for(state, self._random_trajectory(rng), expected_digest=expected, clock=clock)
 
     def _random_trajectory(self, rng):
         # The fixed fixtures.straight_line_trajectory() moves at exactly 0.25m/s -- which sits
@@ -255,9 +315,9 @@ class RandomFuzzTests(unittest.TestCase):
         for i in range(self.N_ITERATIONS):
             state = self._random_state(rng)
             target_id = state.objects[0].object_id
-            gate = gate_for(state, self._random_trajectory(rng))
+            gate = self._random_gate(rng, state)
             try:
-                decision = gate.gate(Action(action_type="grasp", params={"object_id": target_id, "target_position": (0.5, 0, 0.05)}))
+                decision = gate.gate(self._random_grasp(rng, target_id))
             except Exception as exc:  # noqa: BLE001
                 crashes.append((i, repr(exc)))
                 continue
@@ -287,8 +347,8 @@ class RandomFuzzTests(unittest.TestCase):
         for _ in range(self.N_ITERATIONS):
             state = self._random_state(rng)
             target_id = state.objects[0].object_id
-            gate = gate_for(state, self._random_trajectory(rng))
-            decision = gate.gate(Action(action_type="grasp", params={"object_id": target_id, "target_position": (0.5, 0, 0.05)}))
+            gate = self._random_gate(rng, state)
+            decision = gate.gate(self._random_grasp(rng, target_id))
             for r in decision.precondition_results:
                 fired_histogram.setdefault(r.name, {"pass": 0, "fail": 0})
                 fired_histogram[r.name]["pass" if r.satisfied else "fail"] += 1
