@@ -464,6 +464,46 @@ Controls that PERMIT live, so these checks do not simply block everything:
 - **`iso15066_power_force_limiting` only applies within 0.3 m.** Its contact-plausibility range means an adult exactly 0.3 m from a 0.5 m/s grasp sits on the boundary. It fired in one run of that scenario and not in its identical repeat. The separation-distance, swept-path and reduced-speed checks blocked both, and it fired in the faster-reach scenario. That is expected behavior at the boundary; don't read it as a miss.
 - **Still unwired:** `joint_velocity_within_limits` and `self_collision_clear` need a dynamics adapter that predicts joint motion and link geometry, which neither reference adapter does. Motor temperature, joint effort and battery aren't modelled by these simulator tasks. All six stay registered and unwired rather than wired to a check that can only default-deny.
 
+## Closed-Loop Measurement (2026-09-27): Does the Gate Get in the Way of a Working Robot?
+
+Every result above gates single, hand-picked decisions. This one runs a working controller in closed loop, with the gate deciding every one of its 20 Hz control steps, and compares it against the same controller ungated on the same seeds.
+
+**Setup.**
+- **Controller:** the scripted privileged-state Franka cube-stacking expert, 92–94% success on its own.
+- **Why not the Franka RL policy:** it never became competent (full-stack success 0%), so it couldn't separate the gate's effect from policy failure.
+- **Gating:** each step is turned into its decision (grasp on the gripper-closing edge, place on the opening edge while holding, reach otherwise, with the real commanded speed). It goes through the real adapters, `ActuatorGate` and `DecisionWatchdog`, with the pinned config.
+- **Human proxy:** a physical kinematic capsule walks to the far table edge (about 0.45 m from the cubes), stays about 5 s, and leaves. It is tracked from its simulated pose and velocity as an adult with a 1.5 m/s worst-case speed.
+- **Scale:** 128 episodes per condition, 60 s episodes.
+- Script and raw results: `examples/closed_loop/`.
+
+| Condition | Task success | Mean steps to success | Decisions blocked | Arm-moving steps within 1 m of the person |
+| --- | --- | --- | --- | --- |
+| Ungated, nominal | 123/128 (96.1%) | 444 | — | — |
+| Gated, nominal | 122/128 (95.3%) | 443 | 5.1% (3,128 / 61,208) | — |
+| Ungated, person approaches | 123/128 (96.1%) | 444 | — | 14,987 |
+| Gated, person approaches | 121/128 (94.5%) | 661 | 28.7% | **0** |
+
+**What it shows.**
+- **Task success unaffected:** 95.3% gated vs 96.1% ungated, a one-episode difference, well inside the ±~4% interval at n = 128. Time to success is also unchanged.
+- **The robot stops for the person and resumes:**
+  - The ungated arm kept moving within 1 m of the person for 14,987 env-steps.
+  - The gated arm didn't move within 1 m at all. It froze while the person was near and finished afterwards, about 11 s later on average.
+  - The two ungated runs are identical, as they should be: the proxy has no collision.
+- **Gate latency:** mean 7.7 ms per decision, p99 24 ms.
+
+**Where the nominal 5.1% comes from.** Nominal blocks come from exactly two checks, plus 7 deadline blocks:
+- **`joint_position_limits_respected` (2,305):** every one is Franka joint index 5 (`panda_joint6`) within the 0.02 rad margin of a limit during normal stacking. The expert operates that close to the joint's range in ordinary grasps, so the margin, or this controller's use of that joint, needs a deliberate decision. A blanket exemption would be wrong.
+- **`destination_confirmed_stable_and_clear` (816, all at the release moment):** the check blocks while the destination cube is still moving as the held cube is lowered onto it, then permits once it settles.
+- **`decision_within_deadline` (7):** latency spikes up to about 1.5 s while four simulation processes and a training run shared the machine. A real deployment needs a dedicated core for the gate.
+
+None of these cost task success here, because blocks are transient and the controller retries. A real "false-block rate is ~0" claim needs the joint-6 margin and the release-moment behavior resolved first.
+
+**Not shown here:**
+- a learned policy under the gate (the G1 policy is the next candidate, after its decision-segmentation fix);
+- real perception;
+- a person who actually collides (the proxy is non-colliding and tracked perfectly);
+- hardware.
+
 ## Part 7 — Roadmap, Compliance & Change Log
 
 What's next, the commercialization case, prior art, and the version history.

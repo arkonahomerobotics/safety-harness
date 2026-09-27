@@ -1,0 +1,35 @@
+{
+ "gated": true,
+ "human": true,
+ "num_envs": 128,
+ "seed": 1,
+ "success": 121,
+ "success_rate": 0.9453125,
+ "mean_ep_len_success": 661.3305785123966,
+ "decisions": {
+  "reach:permit": 62511,
+  "reach:block": 21511,
+  "grasp:block": 2489,
+  "grasp:permit": 261,
+  "place:permit": 251,
+  "place:block": 1398
+ },
+ "decisions_total": 88421,
+ "blocked_decisions": 25398,
+ "block_rate": 0.2872394566901528,
+ "blocked_by": {
+  "decision_within_deadline": 9,
+  "swept_path_clear_of_agents": 22317,
+  "vulnerable_bystander_protected": 22317,
+  "iso15066_separation_distance_maintained": 18937,
+  "reduced_speed_near_human": 17309,
+  "destination_confirmed_stable_and_clear": 1398,
+  "joint_position_limits_respected": 1677
+ },
+ "gate_ms_mean": 7.674931141810231,
+ "gate_ms_p99": 23.756165199984032,
+ "gate_ms_max": 1529.1773550000016,
+ "min_hand_to_human_m": 0.5990051746625367,
+ "mean_min_hand_to_human_m": 0.6762063436641258,
+ "arm_moving_steps_within_1m_of_human": 0
+}
