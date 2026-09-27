@@ -1,6 +1,8 @@
-# Example action schema for the Isaac Lab cube-stack task (design doc: "Action Precondition
-# Schemas", "Getting Started"). Each action type lists the built-in precondition checks it must
-# pass; an action type left out of this file is blocked unconditionally (unsafe by default).
+# Example action schema, covering two robots (design doc: "Action Precondition Schemas", "Getting
+# Started"): grasp/place/reach for the Isaac Lab Franka cube-stack task, and navigate for the
+# Isaac Lab ANYmal-C navigation task (safety_harness/adapters/isaac_lab_anymal.py). Each action type
+# lists the built-in precondition checks it must pass; an action type left out of this file is
+# blocked unconditionally (unsafe by default).
 
 action_types:
   grasp:
@@ -92,3 +94,34 @@ action_types:
       - name: visibility_above_threshold
         kwargs:
           min_visibility: 0.5
+
+  # For a moving-base robot (Isaac-Navigation-Flat-Anymal-C-v0 via
+  # safety_harness/adapters/isaac_lab_anymal.py) -- the swept-volume checks below now gate the
+  # robot's own body sweeping toward a nav goal, not an end-effector reaching for an object.
+  # balance_margin_maintained is wired here for the first time in this file: every other action
+  # type is a fixed-base arm, which never reports balance state at all.
+  navigate:
+    checks:
+      - name: robot_state_confirmed
+        kwargs: {}
+      - name: balance_margin_maintained
+        kwargs:
+          min_margin_m: 0.03
+      - name: swept_path_clear_of_agents
+        kwargs:
+          margin_m: 0.15
+      - name: iso15066_separation_distance_maintained
+        kwargs: {}
+      - name: iso15066_power_force_limiting
+        kwargs: {}
+      - name: reduced_speed_near_human
+        kwargs: {}
+      - name: swept_path_clear_of_risky_objects
+        kwargs:
+          object_id_param: object_id
+          margin_m: 0.15
+      - name: visibility_above_threshold
+        kwargs:
+          min_visibility: 0.5
+      - name: environment_hazard_clear
+        kwargs: {}

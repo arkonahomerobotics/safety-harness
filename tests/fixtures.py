@@ -150,6 +150,37 @@ def stale_agent(agent_id="person_1") -> TrackedAgent:
     )
 
 
+def quadruped_robot_state(
+    base_position=(0.0, 0.0, 0.6), support_polygon=((0.3, 0.2), (0.3, -0.2), (-0.3, 0.2), (-0.3, -0.2)),
+) -> RobotProprioception:
+    """A legged robot's own state: base position standing in for center of mass (documented
+    simplification -- see isaac_lab_anymal.py), and a real four-foot support polygon centered under
+    it, comfortably stable. No kinematic/electrical limits reported, matching robot_state()'s own
+    sparse-default convention -- this robot doesn't wire those checks either."""
+    return RobotProprioception(
+        joint_positions=(0.0,) * 12,
+        joint_velocities=(0.0,) * 12,
+        end_effector_pose=Pose(position=base_position),  # the base's own pose -- see isaac_lab_anymal.py
+        gripper_state=0.0,
+        center_of_mass=base_position,
+        support_polygon=support_polygon,
+    )
+
+
+def tipping_quadruped_robot_state(base_position=(0.0, 0.0, 0.6)) -> RobotProprioception:
+    """Same robot, but with its support polygon shifted well clear of its center of mass -- e.g. a
+    real foothold slip, or a slope steep enough that its feet are no longer under it. Exercises
+    balance_margin_maintained with real-shaped geometry, not just a missing-state default-deny."""
+    return quadruped_robot_state(
+        base_position=base_position,
+        support_polygon=((0.9, 0.2), (0.9, -0.2), (0.6, 0.2), (0.6, -0.2)),
+    )
+
+
+def navigate_action(target_position=(3.0, 0.0, 0.6)) -> Action:
+    return Action(action_type="navigate", params={"target_position": target_position})
+
+
 def grasp_action(object_id="cube_2", target_position=(0.5, 0.0, 0.05)) -> Action:
     return Action(action_type="grasp", params={"object_id": object_id, "target_position": target_position})
 
@@ -176,5 +207,14 @@ def base_world_state(objects=(), agents=(), visibility=1.0) -> WorldState:
         objects=objects,
         agents=agents,
         robot=robot_state(),
+        environment=EnvironmentSignals(visibility_confidence=visibility),
+    )
+
+
+def quadruped_world_state(agents=(), visibility=1.0, robot=None) -> WorldState:
+    return WorldState(
+        objects=(),
+        agents=agents,
+        robot=robot if robot is not None else quadruped_robot_state(),
         environment=EnvironmentSignals(visibility_confidence=visibility),
     )

@@ -31,18 +31,78 @@ def _distance(a, b) -> float:
     return math.sqrt(sum((ai - bi) ** 2 for ai, bi in zip(a, b)))
 
 
+def _cross(o, a, b) -> float:
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+
+def _convex_hull(points) -> tuple:
+    """Andrew's monotone-chain convex hull, counter-clockwise, no external geometry library --
+    dependency-free per this project's own choice (pyproject.toml declares only pyyaml)."""
+    pts = sorted(set(points))
+    if len(pts) <= 2:
+        return tuple(pts)
+
+    def build(seq):
+        hull: list = []
+        for p in seq:
+            while len(hull) >= 2 and _cross(hull[-2], hull[-1], p) <= 0:
+                hull.pop()
+            hull.append(p)
+        return hull
+
+    lower = build(pts)
+    upper = build(list(reversed(pts)))
+    return tuple(lower[:-1] + upper[:-1])
+
+
+def _point_in_convex_polygon(point, hull) -> bool:
+    n = len(hull)
+    if n < 3:
+        return False
+    return all(_cross(hull[i], hull[(i + 1) % n], point) >= -1e-9 for i in range(n))
+
+
+def _point_to_segment_distance(point, a, b) -> float:
+    ax, ay = a
+    bx, by = b
+    px, py = point
+    dx, dy = bx - ax, by - ay
+    length_sq = dx * dx + dy * dy
+    if length_sq < 1e-12:
+        return _distance((*point, 0.0), (*a, 0.0))
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
+    closest = (ax + t * dx, ay + t * dy)
+    return _distance((*point, 0.0), (*closest, 0.0))
+
+
 def _distance_to_polygon_edge(point_xy, polygon_xy) -> float:
-    """Nearest-vertex distance as a conservative stand-in for true polygon-edge distance. Swap in a
-    computational-geometry library for a real deployment without changing the call site."""
+    """Signed distance from point_xy to the convex hull of polygon_xy's vertices: positive when
+    inside (distance to the nearest edge), negative when outside (how far past it).
+
+    This used to be a nearest-VERTEX distance, documented as "a conservative stand-in ... swap in a
+    computational-geometry library for a real deployment." That stand-in has a real blind spot once
+    the query point is actually outside the polygon: nearest-vertex distance keeps GROWING the
+    further outside it goes (a center of mass 10m past every foot reported a ~9m "margin" --
+    comfortably balanced, on a robot that has clearly already fallen over), because it only ever
+    measures distance-from-a-vertex, never whether the point is inside or outside at all. Found by
+    testing this check against a real, moving legged robot for the first time -- every prior test
+    only ever probed a point already inside or barely outside, never far enough out for a
+    nearest-vertex proxy's blind spot to show. Fixed with the actual computational-geometry library
+    the original docstring invited, at the same call site, per its own instruction not to change it.
+    """
     if not polygon_xy:
         return 0.0
     if not math.isfinite(point_xy[0]) or not math.isfinite(point_xy[1]):
-        # Python's builtin min() silently drops a NaN candidate depending on iteration order
-        # (nan < current is False, so a NaN that isn't first in the sequence never replaces a
-        # normal running minimum) -- see the design doc's NaN-Sensor Stress Test. Fail explicit and
-        # non-finite here rather than let that order-dependence decide the result.
+        # See the design doc's NaN-Sensor Stress Test: fail explicit and non-finite here rather than
+        # let an unconfirmed point flow into hull/distance arithmetic that doesn't itself guard NaN.
         return math.nan
-    return min(_distance((*point_xy, 0.0), (*v, 0.0)) for v in polygon_xy)
+    if len(polygon_xy) < 3:
+        # Fewer than 3 contact points isn't a real support polygon to be inside of at all --
+        # maximally unstable, not "vertex-distance happens to look large."
+        return -min(_distance((*point_xy, 0.0), (*v, 0.0)) for v in polygon_xy)
+    hull = _convex_hull(polygon_xy)
+    d = min(_point_to_segment_distance(point_xy, hull[i], hull[(i + 1) % len(hull)]) for i in range(len(hull)))
+    return d if _point_in_convex_polygon(point_xy, hull) else -d
 
 
 def _ok(name: str, reason: str) -> PreconditionResult:
