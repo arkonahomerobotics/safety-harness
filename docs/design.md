@@ -1,0 +1,455 @@
+# Perception-Grounded Safety Harness for Physical AI
+
+Sep 26, 2026 · Kaoru Naganuma
+
+Every proposed robot action must be affirmatively confirmed safe by perception before it executes — absence of a detected hazard is not enough. A bounded set of preconditions per action type is checked against a structured world model and a forward-simulated trajectory, with any unconfirmed condition defaulting to blocked. This inverts the usual framing: instead of enumerating and detecting every possible hazard in an open-ended environment, a problem that never converges, the harness enumerates what must be confirmed true for a small, fixed set of action types, and blocks by default whenever that confirmation is missing.
+
+## Part 1 — Overview
+
+What this is, the principle it's built on, and what it deliberately does not cover.
+
+## Design Principle: Permission, Not Detection
+
+Every proposed action is unsafe by default and must be affirmatively confirmed safe before it executes. This inverts the usual approach: instead of trying to detect every possible hazard in an open-ended environment — enumerating dangers, which never converges — the harness enumerates the preconditions each action type requires, a small and fixed list, and blocks whenever a precondition lacks confirming evidence.
+
+- **Block-if-detected** (the common approach): safe by default, blocked only when a known hazard pattern is recognized. Fails open on anything the hazard list didn't anticipate.
+- **Permit-if-confirmed** (this design): unsafe by default, permitted only when required preconditions are affirmatively confirmed. Fails closed on anything perception hasn't verified.
+
+The corollary that makes this work: missing, stale, or low-confidence evidence counts as a failed precondition, not as "no violation detected." An unrecognized object defaults to the most restrictive hazard assumption. Degraded perception — low light, occlusion, a sensor fault — lowers confidence on every downstream check rather than being ignored. This is how the harness catches a hazard it was never specifically told about: it isn't recognizing the hazard, it's failing closed on the absence of a confirmed "this is fine."
+
+## Part 2 — Architecture & Interfaces
+
+The decision pipeline, the data contract every adapter targets, and two worked examples of the whole path end to end.
+
+## Architecture Overview
+
+&#91;embedded content: pipeline · perceive, check, decide, execute or fall back, log\]
+
+Every control cycle runs this pipeline in order. A blocked action never reaches the actuators; it triggers the fallback and logs why, and that log is what tightens the precondition rules or perception confidence over time.
+
+## Perception → Structured World State
+
+Perception's output is a structured, legible description of the world — never a safe/unsafe verdict on its own. Collapsing straight to a verdict would just move the coverage problem into a single opaque classifier, one level up from the policy it's meant to check.
+
+What it produces, every cycle:
+
+- Detected objects: class, estimated pose, velocity, hazard attributes (fragile, hot, sharp, human, animal, unknown), a confidence score per attribute.
+- Tracked humans and animals: position, velocity, and an uncertainty bound that grows with time since last confirmed sighting.
+- The robot's own state: joint positions and velocities; for a legged or humanoid platform, center of mass and current support polygon or contact state.
+- Environmental signals: a visibility/confidence quality metric, floor or surface condition where sensed, any detected hazard such as smoke or a spill.
+
+This layer can be learned — object detection and tracking are appropriately statistical. What must not be learned end to end is the step after it: turning this structured state into a permit-or-deny decision. That step is explicit and rule-based, so it can be tested the way a perception model cannot be.
+
+## Worked Examples
+
+Two real decisions, shown end to end through the same `WorldState` -> `ActuatorGate.gate()` -> `Decision` path every action takes, using the actual checks and thresholds documented in this spec.
+
+### Example A — permit (grasp, everything clears)
+
+```
+WorldState                          ActuatorGate.gate(grasp cube_2)
+-----------                          ---------------------------------
+robot: proprioception OK        -->  robot_state_confirmed         PASS
+cube_2: pose confirmed 0.82     -->  object_pose_confirmed         PASS
+cube_2: hazard_confidence 0.9   -->  object_hazard_confirmed       PASS
+cube_2: cleared_for_interaction -->  object_cleared_for_interaction PASS
+cube_2: supported_stably        -->  current_position_confirmed    PASS
+cube_2: fall_consequence=LOW    -->  fall_consequence_acceptable   PASS
+cube_2: mass 0.05kg / 3kg budget-->  mass_within_force_budget      PASS
+agent: none within 7m           -->  swept_path_clear_of_agents    PASS
+                                 -->  iso15066_separation_distance  PASS
+                                 -->  iso15066_power_force_limiting PASS
+                                 -->  reduced_speed_near_human      PASS
+risky objects: none in path     -->  swept_path_clear_of_risky     PASS
+visibility: 0.83                -->  visibility_above_threshold    PASS
+surface_hazards: none           -->  environment_hazard_clear      PASS
+                                      ============================
+                                      DECISION: PERMIT
+```
+
+All 14 `grasp` checks pass against real measured values — a bystander shaped like the `far_agent()` test fixture, roughly 7m away, is functionally absent from every proximity check. The arm executes the action unmodified.
+
+### Example B — block (agent inside the force-limiting radius)
+
+Same action, one field changed: a tracked person is now roughly 0.2m from the grasp point. `ActuatorGate.gate()` does not short-circuit — every registered check for the action type runs (see `action_schema.py: run_checks`), and the resulting `Decision` carries every result, so a block is logged with every reason that fired, not just one:
+
+```
+agent: distance 0.20m           -->  iso15066_power_force_limiting BLOCK
+agent: distance 0.20m           -->  iso15066_separation_distance  BLOCK
+agent: distance 0.20m           -->  swept_path_clear_of_agents    BLOCK
+(11 other checks)               -->  ...                            PASS
+                                      ============================
+                                      DECISION: BLOCK (3 of 14 checks failed)
+```
+
+`iso15066_power_force_limiting` firing here is itself the fix for a real bug found during this build: the check originally had no distance gate at all, so a tracked agent anywhere in the scene — 7m away, in one regression test — failed it as though contact were imminent. The `contact_plausible_range_m=0.3` gate (Functional & Behavior Specification, below) is what makes this example correctly tell '0.2m, must block' apart from Example A's \~7m bystander, correctly ignored.
+
+## Action Precondition Schemas
+
+Each action type carries an explicit, hand-authored list of what must be confirmed — not learned, so it can be unit-tested against constructed world states.
+
+| Action type | Required preconditions | Blocks if | Confidence gate |
+| --- | --- | --- | --- |
+| grasp(object) | Object hazard class confirmed (not "unknown"); estimated mass within gripper force budget; swept path clear of any tracked human's worst-case region for the motion's duration | Any precondition unconfirmed, or object class unknown | Object pose confidence above threshold |
+| place(object, location) | Destination surface confirmed stable and clear; if object tagged liquid-containing, orientation constraint holds throughout | Surface unconfirmed, or orientation constraint predicted to be violated | Surface classification confidence above threshold |
+| step(foot, target) — legged/humanoid | Target surface confirmed solid and traversable; balance margin maintained throughout the swing, not just at landing | Surface unconfirmed, or balance margin predicted to cross threshold at any point | Terrain classification confidence above threshold |
+| reach near a tracked human | Human's worst-case reachable region — given tracking latency and a velocity bound — does not intersect the swept path for the action's full duration | Worst-case region intersects the swept path at any point | Human tracking confidence above threshold, else assume the closest plausible position |
+| any action — general gate | Perception visibility/confidence quality above minimum operating threshold | Visibility metric below threshold | Blocks all actions, not just one type |
+
+**Extended since the table above.** The original checks only asked whether the target's hazard class was known. That misses several real questions: is the target itself cleared to approach at all, is its current position confirmed stable, what happens if it's dropped, and can an *uncleared or hazardous bystander object* — never the action's own target — block an action purely by being near the swept path.
+
+`object_cleared_for_interaction`, `current_position_confirmed_stable`, and `fall_consequence_acceptable` extend `grasp`; `destination_confirmed_stable_and_clear` (superseding `surface_confirmed_stable`) extends `place`; and `swept_path_clear_of_risky_objects` is a new general gate, alongside visibility, that blocks proximity to any uncleared or hazardous-release object regardless of whether it's the current target — this is what lets a bystander object be too dangerous to work near even when nothing is being done to it directly.
+
+`TrackedObject` gained matching fields — `cleared_for_interaction` (default false), `supported_stably`, `fall_consequence`, `drop_tolerance_m` — all defaulting to the most restrictive assumption, consistent with the Design Principle section above.
+
+`fall_consequence_acceptable` reasons about lift height by comparing the object's resting height against the highest point in whatever trajectory the dynamics adapter predicts. That's only meaningful if the adapter is actually predicting the post-grasp carry, not just the pre-grasp approach — worth checking specifically when validating a new `DynamicsAdapter`, since the two look similar but answer different questions.
+
+## Part 3 — Functional & Behavior Specification
+
+What the harness checks, in what order, including regulatory-mapped checks and the robot's own kinematic, electrical, and balance limits.
+
+## Trajectory Forward-Check
+
+Checking only the current instant misses hazards that appear partway through a motion — a swept path that's clear now but crosses a tracked human's position half a second later. The harness forward-simulates the proposed action over a short horizon using the robot's own dynamics model, then checks the predicted trajectory — not just its endpoint — against every precondition in the table above, at every point along it.
+
+This is the established control-theoretic pattern of a Control Barrier Function: a safety function that must stay non-negative throughout the predicted rollout, with any action whose forward simulation would drive it negative rejected before execution. For a platform already built on a physics simulator, the same simulator can run this forward check in a lightweight prediction mode — it doesn't need to be a separate system.
+
+For a humanoid, this check also covers whole-body balance: an arm reach that's fine at the target pose can still be unsafe mid-motion if it predicts the center of mass leaving the support polygon at any intermediate point.
+
+## Fallback Control and Recovery
+
+When a precondition fails, the harness needs a trusted fallback — simple enough that it doesn't inherit the coverage problem of the policy it's replacing.
+
+- Freeze in place: safe by default for a fixed-base platform, or a legged one currently in a statically stable stance.
+- Retract to a known safe pose: use once the retract trajectory itself has been verified collision-free.
+- A simpler, better-characterized closed-loop controller substituting for the primary policy on a specific sub-task, where one exists and is well-validated.
+
+Freezing is not automatically safe for a walking humanoid. Halting mid-single-support-phase can cause a fall, which is itself a serious hazard — a heavy platform falling is arguably worse than whatever the harness was blocking. The fallback needs its own state machine: if currently in a statically stable double-support stance, halt immediately; if mid-step, complete the current step to a stable stance first, then halt.
+
+## Logging, Escalation and the Correction Loop
+
+Every block is logged with full context: which precondition failed, and the perception state that produced the rejection. Repeated blocks on the same action escalate to a human rather than retrying indefinitely — "failed three times, paused for review" — with a reachable kill switch at every stage.
+
+This log is not just an incident record. A human reviews it and either improves perception confidence where it was needlessly conservative, or tightens a precondition rule where it should have caught something it didn't. The correction happens deliberately, by inspection of an explicit rule — not by retraining on more data and hoping the next model generalizes better, which would reintroduce the same coverage problem this design exists to avoid.
+
+## Robot Self-Limits: Kinematic, Electrical, and Balance
+
+Everything above checks the world around the robot -- objects, agents, surfaces. None of it checks whether the robot's own commanded motion stays within what it can physically and electrically do. That's a distinct category, and until now only balance (`balance_margin_maintained`, already in the table above) was covered -- and even that only against hand-built fixtures. Updated (2026-09-27): the ANYmal-C navigation adapter (Development Roadmap, stage 4) is the first anywhere in this project to feed it a real support polygon -- four real foot contact positions -- and doing so immediately found a real bug in \_distance\_to\_polygon\_edge's own documented simplification: nearest-vertex distance keeps growing, not shrinking, the further a point moves outside the polygon, so a center of mass 10m past every foot read as a \~9m margin -- comfortably balanced, on a robot that has clearly already fallen over. Fixed with a proper signed distance to the polygon's convex hull (positive inside, negative outside), at the same call site its own docstring had already invited a real computational-geometry library to replace. See tests/test\_anymal\_adapter.py and safety\_harness/adapters/isaac\_lab\_anymal.py.
+
+Six new checks, all following the same default-deny convention as everything else -- missing data blocks, it never permits:
+
+| Check | Verifies | Needs from the adapter |
+| --- | --- | --- |
+| `joint_position_limits_respected` | Every joint stays within its range, with margin, throughout the motion | Per-joint (min, max) limits, reported every point |
+| `joint_velocity_within_limits` | Every joint's speed stays within a fraction of its rated limit -- this is also where an unmodeled kinematic singularity shows up, since required joint speeds spike near one even for modest commanded Cartesian speed | Per-joint velocity limits |
+| `joint_effort_within_limits` | Torque/current stays within each joint's rated limit -- the electrical/mechanical load side | Per-joint effort limits and an effort estimate |
+| `motor_temperature_within_limits` | Every motor currently has thermal headroom before taking on more sustained load | Current temperature and limit, per joint |
+| `cartesian_speed_within_limits` | The swept end-effector path stays within the platform's rated speed | A configured speed limit; computed directly from predicted trajectory points |
+| `self_collision_clear` | The robot's own links stay clear of each other throughout the motion | A collision margin per point, from the adapter's own collision geometry -- not something a generic check can recompute from joint angles alone |
+
+**Not yet wired into the reference Isaac Lab adapter.** `RobotProprioception` carries fields for all of the above, but `IsaacLabCubeStackPerceptionAdapter`/`DynamicsAdapter` don't populate them yet, and the reference dynamics adapter only predicts the swept Cartesian path -- it doesn't do joint-space or differential-IK prediction at all. That means `cartesian_speed_within_limits` could be made meaningful today; the joint-space checks (position, velocity, effort) and self-collision cannot be, until the adapter predicts joint-level motion rather than just interpolating an end-effector position. Wiring hardcoded joint limits into the adapter now, without reading them from the robot's own articulation data, would be worse than leaving the gap explicit -- a wrong number creates false confidence, which is exactly what this design exists to avoid.
+
+This is deliberately not added to `configs/example_action_schema.yaml`'s `grasp`/`place` checks yet, for the same reason: requiring a check the adapter can't yet answer would either block everything or silently misrepresent what's actually being verified.
+
+## Regulatory Mapping
+
+The Prior Art section cited ISO/TS 15066 and ISO 10218 by name without implementing either faithfully. This section closes that gap for the one clause that maps directly onto what's already built, and is explicit about what still doesn't.
+
+**Implemented: ISO/TS 15066:2016 Annex A, Speed and Separation Monitoring.** `iso15066_separation_distance_maintained` computes the standard's actual protective separation distance, S(t0) = Sh + Sr + Ss + C + Zd + Zr — the human's own reach during the system's reaction interval, the robot's travel during that same interval, the robot's stopping distance once decelerating, a fixed intrusion allowance, and position-uncertainty terms for both the human and the robot. This supersedes `swept_path_clear_of_agents`' flat margin for human/animal proximity specifically, the same way `destination_confirmed_stable_and_clear` superseded `surface_confirmed_stable` earlier — both stay registered and wired; either can block.
+
+**What this is not:** the numeric defaults (reaction time, sampling interval, deceleration, intrusion distance) are representative literature values for the *structure* of the calculation, not a certified figure for any real deployment. ISO/TS 15066 compliance means a qualified safety engineer characterizes the actual system's reaction time and sets these from the standard's current edition — this module makes that a small set of named, documented parameters instead of a hand-picked margin, but it does not make the module "ISO/TS 15066 certified" on its own, any more than the Commercialization section's certification-packaging idea is itself a certificate.
+
+**Not yet implemented, named honestly rather than skipped:**
+
+- ISO/TS 15066's Power and Force Limiting clause (biomechanical contact-force and pressure limits per body region) — would need an estimate of collision force from robot effective mass and approach speed, a real but more speculative addition than the separation-distance formula above.
+- ISO 10218-1/2's broader industrial robot safety requirements — most of what applies is hardware-level (E-stop, safety-rated monitored stop), already scoped out of this software layer in Prior Art and Open Questions above.
+- ISO 12100's risk-assessment methodology (severity × exposure × avoidance possibility) as a formal rating of each hazard this module addresses — the hazard checklist and stress-testing sections above are the informal version of this; a real deployment's safety case should redo it formally, per hazard, with a qualified reviewer.
+
+## Part 4 — Performance Specification
+
+Measured latency, not assumed.
+
+## Latency: Measured, Not Assumed
+
+The Reference Module Design section flagged control-loop rate as a constraint the module can't paper over, but hadn't been measured against the real wired schema. It now has:
+
+| Scenario | mean | p50 | p99 |
+| --- | --- | --- | --- |
+| Normal scene (1 object, no agents) | 20.9μs | 16.0μs | 27.5μs |
+| Stress: 50 bystander objects + 10 tracked agents + 50-point trajectory | 506μs | 495μs | 605μs |
+
+The median cost is not a concern at any realistic control-loop rate; the harness runs once per proposed action, not once per joint-servo tick. The two swept-path checks (`swept_path_clear_of_agents`, `swept_path_clear_of_risky_objects`) are the hot path -- each is O(tracked entities × trajectory points) -- so scene *population* (many tracked people or objects), not trajectory resolution, is what would actually scale this up.
+
+**The one real finding: occasional multi-millisecond tail latency, confirmed to be garbage-collection pauses, not the harness's own logic.** With Python's GC on, worst observed was \~28ms across 20,000 calls; disabling it dropped that to \~1.5ms with no change to the median. That's integration guidance, not something to bake into `ActuatorGate` itself: `gc.freeze()` after process startup, or a scheduled manual `gc.collect()` during a known-idle window, rather than leaving automatic collection to fire mid-cycle. Disabling GC globally is the host application's call, not this module's to impose.
+
+For the live Isaac Lab deployment specifically: perception's own `get_world_state()` call (0.7–1.1ms per env, measured in the live validation run above) costs more than the harness's own decision logic does in a normal scene. **Today, perception is the bottleneck, not the harness.**
+
+## Part 5 — Integration Guide
+
+How to wire this into a robot stack that isn't the Isaac Lab reference implementation.
+
+## Integration Points
+
+The harness sits at one place in any robot's control stack: between whatever produces a proposed action (a learned policy, a planner, a teleoperation input) and whatever executes it (the motor or actuator command interface). It does not need to know how the action was produced — only what it proposes to do next, and enough current world state to check it against.
+
+Concrete integration points, in the order a control loop reaches them:
+
+- **Action interface boundary.** Wrap the single function or message where a proposed action leaves the policy or planner and enters actuation — the `step()` call, the joint-command publisher, the action-server callback. The harness intercepts here and reads the proposed action; it does not touch the policy's internals.
+- **Perception feed.** Subscribe to whatever the robot already publishes as perceived state — object detections, human tracking, proprioception, camera or depth topics. The world-state layer consumes existing sensor and perception output; it doesn't add new sensors.
+- **Robot dynamics or kinematics model.** The trajectory forward-check needs the same forward-kinematics or physics model the robot's own motion planner already has — reuse it, don't duplicate it.
+- **Actuator command path.** The harness's permit, deny, or fallback decision is what actually reaches the motors — this is the one place its authority must be absolute: even if every upstream check were somehow bypassed, this final clip is the last line before physical motion.
+- **Logging and telemetry sink.** Write every decision — permitted, blocked, fallback triggered, why — to whatever the robot already logs to. This needs no new infrastructure, just a new event type.
+
+Making this portable across different robots depends on keeping three things robot-specific and swappable behind one fixed interface:
+
+1. **The world-state schema is fixed; the perception filling it is not.** Every robot implements the same structured output — objects and attributes, tracked agents and uncertainty, robot proprioceptive state, environment signals — regardless of what sensors or models produce it. A wheeled arm and a bipedal humanoid both produce this same shape; only the humanoid additionally fills the balance and support-polygon fields.
+2. **The precondition table is per-robot; the checking engine is not.** `grasp`, `step`, and `reach-near-human` are declared per platform — a wheeled robot has no `step`, a fixed-base arm has no balance constraint — but the code evaluating "are this action's declared preconditions confirmed" is the same engine for every robot, reading a config rather than running different code per platform.
+3. **The fallback behavior is per-robot; the trigger logic is not.** What "safe fallback" means differs by embodiment — freeze, complete-current-step-then-halt, retract — but the decision of when to invoke it is the same shared monitor logic.
+
+That separation — a fixed interface contract (world-state schema, decision API, logging format) with robot-specific content behind it — is what lets one harness codebase sit in front of many different robots, the same way a fixed hardware safety-rated-monitored-stop interface sits in front of many different industrial arms today: the interface is standard, the sensors and stopping behavior behind it are not.
+
+## Reference Module Design
+
+Package this as a small library with a narrow public surface: one shared data schema, four adapter interfaces a robot team implements, and one decision engine they configure but never fork.
+
+**Interfaces a robot team implements** — the only integration work required:
+
+| Interface | Method | What it wraps |
+| --- | --- | --- |
+| `PerceptionAdapter` | `get_world_state() -> WorldState` | The robot's existing detection, tracking, and proprioception, mapped into the fixed schema |
+| `DynamicsAdapter` | `predict_trajectory(action, horizon) -> PredictedTrajectory` | The robot's existing forward-kinematics or physics model |
+| `FallbackController` | `execute(state) -> Action` | The robot-specific safe fallback — freeze, retract, complete-step-then-halt |
+| `Logger` | `record(decision)` | Whatever telemetry sink the robot already writes to |
+
+**What ships built in, and is configured rather than rewritten per robot:**
+
+- The `WorldState` schema itself — versioned, not reimplemented per robot.
+- The decision engine (`ActuatorGate`): runs the precondition checks and the trajectory forward-check, returns permit or block-plus-fallback. This is the one piece every integration shares byte for byte — letting each robot team fork it defeats the point of keeping it small enough to test exhaustively.
+- A library of generic precondition checks written only against `WorldState` and `PredictedTrajectory` — swept-path-clear-of-humans, mass-within-force-budget, balance-margin-maintained, surface-confidence-above-threshold — reusable across robots because they're written against the shared schema, never a robot's native representation.
+- A declarative action-schema config (YAML or JSON): a robot team lists its action types and which checks apply, by name, from the built-in library. A genuinely new precondition is a registered function, not a change to the engine.
+
+**The integration itself, in an existing control loop:**
+
+```
+harness = ActuatorGate(perception_adapter, dynamics_adapter,
+                        fallback_controller, logger,
+                        action_schema="config.yaml")
+
+# the one line inserted before any action reaches actuators
+decision = harness.gate(proposed_action)
+execute(decision.action)  # the original action, or the fallback
+```
+
+**Distribution choices that keep it portable across stacks, not just one robot:**
+
+- No hard dependency on any specific ML framework or simulator in the core engine — an adapter can use whatever it needs internally to satisfy its interface, but the engine itself stays framework-agnostic and small.
+- A thin ROS2 wrapper package alongside the core library, subscribing to standard topic types and calling `gate()` — for most teams already on ROS2, that wrapper is the actual integration point, not the raw library.
+- One worked reference adapter (against a simulator) shipped as a copyable starting template, not just the interface spec — teams integrate faster from a working example than from an abstract contract.
+- The conformance test suite from Testing and Validation, shipped as an installable fixture: a team runs it against their own adapter to self-certify — does its `WorldState` output satisfy the schema, does its dynamics prediction look sane — before ever trusting the harness with their robot.
+- The `WorldState` schema and the action-schema config format are versioned with an explicit migration path. "Fixed interface" has to mean stable and versioned, not frozen forever, or the module can't evolve without breaking every existing integration.
+
+**A constraint the module can't paper over:** control-loop rate. The gate typically runs once per proposed action, well below joint-servo rate, so a high-level-language implementation is fine on most platforms — but a fast-moving humanoid with a tight action cadence may need the engine's hot path compiled or otherwise low-latency. Each team makes that call for its own timing budget; the module doesn't hide it.
+
+## Stack-by-Stack Integration
+
+The four adapter interfaces are the same everywhere; what changes per stack is only what each adapter wraps.
+
+| Stack | `PerceptionAdapter` wraps | `DynamicsAdapter` wraps | `FallbackController` wraps | `Logger` wraps |
+| --- | --- | --- | --- | --- |
+| ROS2 | Standard perception topics (detection/pose arrays, TF for tracked frames) and joint-state topics | The kinematics library the existing motion planner already uses, against the robot's URDF | The robot's own action-server trajectory interface, commanding a hold or retract | The existing diagnostics topic |
+| ROS1 | The same shape, over topics and services instead of DDS — the adapter code differs, the `WorldState` it produces does not | The existing FK/IK service | The existing trajectory action interface | `rosout` or an existing bag-recorded topic |
+| Proprietary industrial-arm SDK, no ROS | The vendor SDK's own state-query calls | The vendor SDK's forward-kinematics call, or a URDF-based library shipped alongside it | The vendor SDK's own stop or hold command | Whatever the vendor SDK already logs to, or a local file |
+| Simulation-first stack (Isaac Lab, MuJoCo, PyBullet) | Privileged simulator state read directly — useful for validating the engine before any real perception is involved | The same simulator, run in a lightweight non-training rollout mode | A scripted hold or retract policy in the same simulator | Whatever the simulation harness already logs |
+| Bare or embedded custom stack, no framework | Whatever sensor-reading calls already exist — the most integration work of any row, since there's no framework to lean on | A hand-rolled or library forward-kinematics function | A hand-written safe-stop routine | A local log file or serial diagnostic output |
+
+In every row, the adapter's job ends at producing a `WorldState`, a `PredictedTrajectory`, or executing a `FallbackController.execute()` call — it never reimplements the decision engine itself.
+
+## Getting Started
+
+1. Install the core library and, if applicable, the stack-specific wrapper package — for example the ROS2 wrapper — alongside your existing robot code. No change to existing code is required at this step.
+2. Implement `PerceptionAdapter.get_world_state()` against whatever perception your robot already runs. Start narrow: a stub returning only proprioceptive state, with no object or human tracking yet, is enough to bring the engine up.
+3. Implement `DynamicsAdapter.predict_trajectory()` against your existing kinematics or physics model.
+4. Write an `action_schema.yaml` covering just one action type to start — the one you consider lowest-risk — referencing the built-in precondition checks by name.
+5. Implement `FallbackController.execute()`. For a first integration, "freeze in place" is enough if your platform is fixed-base or currently in a stable stance.
+6. Run the conformance test suite against your adapters before wiring anything to actuators. Fix whatever it flags first.
+7. Wire `harness.gate()` in front of that one action type only, with logging on, and watch the decision log before trusting it — in simulation first, then on hardware with a supervised kill switch, before adding more action types.
+
+Never wire all action types at once on a first integration. One type, watched closely, first.
+
+## Part 6 — Validation & Test Record
+
+Every test suite and every live-simulation hazard run, with the actual pass/fail criteria and results.
+
+## Testing and Validation Strategy
+
+Because the precondition and trajectory-check layers are explicit and rule-based rather than learned end to end, they can be validated before deployment the way any critical software is: construct a world state by hand, propose an action, and assert the harness blocks or permits it correctly. Build this as a real test suite, covering at minimum:
+
+- Every action type's positive case (all preconditions confirmed, correctly permitted) and at least one negative case per precondition (that precondition unconfirmed, correctly blocked).
+- Degraded-perception cases: low confidence on each input a precondition depends on, confirming the harness fails closed rather than defaulting to permit.
+- Adversarial and boundary cases: a human at the edge of the exclusion margin, an object just above the mass threshold, a foot target just below the terrain-confidence gate.
+- Replayed real sensor logs from prior operation, to catch cases the hand-constructed test states missed.
+
+This is the payoff of keeping the gating logic explicit instead of learned: a neural safety classifier can't be exhaustively tested this way, because there's no way to enumerate what it has and hasn't actually learned to recognize.
+
+## Live Validation Results (Isaac Lab, 2026-09-26)
+
+Development Roadmap stage 3, actually run against a live environment (`Isaac-Stack-Cube-Franka-IK-Rel-v0`, 8 parallel envs): perception schema conformance, multi-env isolation (a perturbation to one env's cube was confirmed invisible to another), cube height against this project's own established ground truth (0.0203m, matched exactly), the dynamics adapter's side-effect-freedom and trajectory sanity, and the missing-target-position fix from before -- all passed on the first or second try.
+
+**Two real fixes landed during this run, not just checked:**
+
+- The gripper-aperture read now resolves finger joints by name (`find_joints("panda_finger_joint.*")`) instead of assuming the last two joint indices -- the gap flagged in the conformance checklist earlier, now fixed and confirmed (`finger_ids=[7, 8]`).
+- The first end-to-end run correctly **blocked** a grasp of a harmless training cube, because the adapter never asserted `cleared_for_interaction`, `supported_stably`, or `fall_consequence` for its own cubes -- default-deny working exactly as designed, just not usefully. Fixed by having the adapter assert what's actually known about these specific, controlled props (cleared, no fall consequence) and by computing `supported_stably` from a real measured signal -- vertical velocity near zero -- rather than assuming it. A second run then correctly permitted the grasp, all 8 wired preconditions satisfied.
+
+That second fix is worth normalizing: it's an example of an adapter needing to *earn* a permissive field from real evidence about its specific deployment, not inherit a permissive default -- exactly the distinction the Design Principle section draws, now confirmed live rather than only in fixtures.
+
+## Stress Testing Without Presupposing the Failure Mode
+
+Every test up to this point was written knowing exactly which precondition it would trip -- useful for confirming each check works, but it can't tell you whether the harness catches something nobody specifically coded a check for. Three techniques address that directly, none of which require deciding in advance what should fail:
+
+- **Mutation testing**: take one confirmed-good scenario, corrupt one field at a time, assert only that *something* blocks it -- never which check by name.
+- **Random fuzzing against structural invariants**: generate thousands of random, often nonsensical world states and check properties that must hold regardless of the specific scenario (chiefly: permit implies every wired result was satisfied; nothing raises an unhandled exception).
+- **Pathological input**: malformed data nobody wrote a targeted check for (NaN coordinates, an empty predicted trajectory, `robot=None`, a target id that doesn't exist, a third party's precondition function that itself has a bug and raises) -- the bar is fail safe, never silently permit or crash the control loop.
+
+**Three real gaps found this way, all fixed:**
+
+1. Nothing checked the target's *pose* confidence, only its *class* confidence -- `object_pose_confirmed` added, and extended to reject a non-finite (NaN/Inf) position outright, independent of whatever confidence score came with it.
+2. An empty predicted trajectory silently permitted, because every swept-path check loops over `trajectory.points`, and a loop over zero points returns "no violation found" rather than "no basis for a decision." Fixed at the engine level: zero predicted points is now its own explicit failure, checked before any precondition runs.
+3. Nothing checked that `state.robot` even exists before permitting a grasp -- `robot_state_confirmed` added as a general gate, alongside visibility.
+
+**One honest limitation of the fuzzer itself, not the harness:** the random generator always produces *some* robot state, so `robot_state_confirmed` never failed across 3,000 random iterations -- it's exercised only by the dedicated pathological test, not the random sweep. Worth strengthening the generator later rather than treating the 0% fuzz-failure rate as suspicious on the harness's part.
+
+All 61 tests (49 targeted + 12 stress) pass. The stress suite lives in `tests/test_fuzz.py`.
+
+## NaN-Sensor Stress Test (2026-09-27): A Comparison-Based Default-Deny Bypass
+
+Every numeric precondition in `preconditions.py` enforces default-deny through a `<`/`>` comparison against a sensor-derived float, and IEEE-754 makes every such comparison against NaN `False` -- so a NaN in the one field a check exists to guard never trips that check's failure branch. `object_pose_confirmed`'s existing NaN guard (Stress Testing above) fixed this for one field on one check; this pass checked whether it generalized. It mostly didn't. Full reproduction against the real `ActuatorGate.gate()` (not the precondition functions in isolation): `tests/test_adversarial_stress.py`.
+
+- **`mass_within_force_budget` -- confirmed, standalone.** `obj.estimated_mass_kg = nan` makes `gate()` PERMIT a grasp of an object whose mass was never actually measured. Nothing else registered for `grasp` looks at mass at all, so this is its only guard and there is no second check to catch what it misses.
+- **`object_hazard_confirmed` / `object_pose_confirmed` -- the confidence field itself, not just position.** A NaN `class_confidence` or NaN `pose_confidence` both bypass their respective confidence gates (`< min_confidence` is `False` for NaN) the same way a NaN *position* did before the existing fix -- that fix cross-checked position against `math.isfinite`, but nothing cross-checks the confidence score itself the same way.
+- **Compound: a single NaN agent-position coordinate defeats `swept_path_clear_of_agents` and `iso15066_separation_distance_maintained` simultaneously** -- both individually confirmed reporting `satisfied=True` on it. For a standard-speed human (1.5 m/s) the overall decision still blocks, but only because `iso15066_power_force_limiting`'s force estimate exceeds 150N at that speed regardless of true distance, not because that check is immune to the same bug: its own "too far to matter, skip" gate (`d > 0.3m`) is defeated by the same NaN in the *opposite* direction (it stops skipping instead of stops blocking). Swap in a slower-moving tracked agent (0.15 m/s -- a mobile-base teammate, not a pedestrian) and the coincidence disappears: `gate()` fully PERMITs a grasp passing 0.19m from that agent -- inside the ISO/TS 15066 separation distance -- with every registered check reporting satisfied.
+- **`balance_margin_maintained` -- same pattern, latent.** Not wired into the example `grasp`/`place`/`reach` schema today (no legged platform in this reference config), so it can't be reached through `gate()` yet, but a NaN center-of-mass component defeats it directly at the function level the same way -- worth fixing before any humanoid/legged adapter registers it, not after.
+
+**The root cause is one line, repeated across most of the file.** Each check above writes its guard as `if measured_value < threshold: fail()` and trusts that a corrupted or never-actually-measured value lands on the failing side. NaN doesn't -- it fails every comparison, in both directions, which is exactly backwards from what a default-deny gate needs. The fix isn't per-check; it's one shared primitive (treat any comparison operand that fails `math.isfinite` as an automatic, explicit fail, before the numeric comparison runs at all) applied everywhere a sensor-derived float currently flows straight into `<`/`>`. Not applied yet -- this pass found and reproduced the gap, it didn't patch it.
+
+**Fixed, validated, and released (2026-09-27):** all four findings above are fixed in `preconditions.py` via three shared comparison helpers (`_below`/`_exceeds`/`_at_or_within`) plus a `_safe_max` helper for two places Python's own `max()`/`min()` could silently drop a NaN candidate depending on iteration order, and a direction-aware fix to `iso15066_power_force_limiting`'s own "too far, skip" gate (which needed the opposite NaN handling from every other comparison in the file). Validated three ways: the full suite plus 14 new regression tests in `tests/test_adversarial_stress.py` passing locally; the same checkout's tests passing against the Isaac Lab GPU box's own bundled Python; and 5 live fault-injection scenarios (one field, or one injected tracked agent, corrupted to NaN on top of real, live cube/robot state) run through the real `IsaacLabCubeStackPerceptionAdapter` in a running Isaac Sim environment on `isaac-launchable-1aebd7` -- all pass. Released as [v0.2.2](https://github.com/naganumakr/safety-harness/releases/tag/v0.2.2) and published to [PyPI](https://pypi.org/project/safety-harness/0.2.2/).
+
+## Hazards Generated Live in Isaac Sim (2026-09-26)
+
+A different exercise from the black-box data-level fuzzing above: real simulated conditions -- actual object velocities, actual poses, actual robot joint state -- driven through the real `IsaacLabCubeStackPerceptionAdapter`/`DynamicsAdapter`/`ActuatorGate`, not hand-built fixtures.
+
+| Hazard | What was actually done in the simulator | Result |
+| --- | --- | --- |
+| Baseline | Nothing disturbed | Permit |
+| Real falling cube | Cube given an actual -0.5 m/s vertical velocity | Block (`current_position_confirmed_stable`) |
+| Real sideways knock | Cube given an actual 1.5/0.8 m/s lateral velocity | **First run: permitted -- a real bug** |
+| Bystander proximity sweep, unflagged | A second cube moved to 2–50cm from the target | Permitted at every distance (expected -- see below) |
+| Bystander proximity sweep, hazard-flagged | Same sweep, with the bystander's classification overridden to uncleared/hazardous-release via a wrapper adapter | Blocks at ≤20cm, permits at ≥30cm -- matches the configured math exactly (0.05m swept-volume radius + 0.15m margin = 0.20m) |
+| Robot driven to within 0.01 rad of a joint limit | Real joint positions written via the simulator | Permits -- the known, already-documented gap (joint checks aren't wired into this schema), not a surprise |
+| Commanded motion implying \~40 m/s | An unreachable target with a 0.05s horizon | Permits -- same known gap, Cartesian speed checks aren't wired either |
+| Compound: falling cube + close hazardous bystander | Both at once | Blocks on both reasons simultaneously |
+
+**One real bug found, fixed, and reconfirmed live:** the sideways-knock case initially permitted. `supported_stably` checked only vertical velocity (`abs(vel[2]) < 0.05`) -- a cube sliding across the table at 1.5 m/s isn't falling, so it read as stable. Fixed to check total speed instead of just the vertical component; rerun against the same live disturbance now blocks correctly.
+
+**One apparent gap that turned out to be a test-design gap, not a harness bug:** the first bystander sweep permitted at every distance down to 2cm. The reference adapter marks every cube it sees as cleared and harmless by default (a deliberate, documented choice for this specific controlled task -- see Live Validation Results above), so moving an already-harmless object closer was never going to trigger anything. Re-run with a wrapper adapter that overrides one object's classification to genuinely hazardous, the same sweep produces a clean, sharp threshold that matches the configured margin exactly. Worth remembering generally: a black-box result that looks like a miss is sometimes the test's setup, not the system under test -- check which one before reporting a finding.
+
+## Environmental and Regulatory Hazards, Live in Isaac Sim (2026-09-26)
+
+A broader sweep than the earlier hazard videos: real light dimming, two real physical stand-ins (a human-sized and a pet-sized capsule, spawned into the scene config, tracked from their actual measured position/velocity), simulated sensor dropout, and dense multi-hazard clutter — run against the newly added ISO/TS 15066 checks, not just the original flat-margin ones. Every scenario below states its pass/fail criterion explicitly and was re-verified step by step, not just checked at a final frame.
+
+| Hazard | Criterion | Result |
+| --- | --- | --- |
+| 1. Lighting degradation | Block only once visibility drops below the configured 0.5 threshold | **Pass** — crossed to block at visibility=0.492, just below threshold |
+| 2. Human approaching | Permit while far, block once close | **Pass** — permit at step 0, block at step 25/70 |
+| 3. Pet approaching (faster, smaller) | Same, accounting for the pet's higher worst-case speed requiring a larger safe starting distance | **Pass on the second attempt** — see below |
+| 4. Stale tracking, proxy stationary | Permit at zero staleness, block from staleness alone, object never moves | **Pass** — permit at step 0, blocked at step 13 from staleness alone (measured worst-case radius 3.45m against a 3.5m starting distance) |
+| 5. Dense multi-hazard clutter | Multiple simultaneous hazard sources each contribute a reason | **Pass** — 4 distinct checks fired at once; no explicit no-clutter control was run alongside it, worth noting |
+
+**Hazard 3 failed its own criterion on the first attempt, and it was a test-design bug, not a harness bug.** The pet was given `worst_case_speed_mps=2.5` (versus 1.5 for the human, on the reasoning that pets dart faster) but started at the same \~2.5m distance used for the human. At 2.5 m/s, the swept-path check's own 1-second prediction horizon alone requires \~2.7m of clearance — the pet was inside that radius before it ever moved, so the scenario blocked from step 0 and never demonstrated an approach at all. Moved the start to \~4.6m; second run passed cleanly. The lesson generalizes: a faster worst-case speed rating pushes the *always-blocks* radius out proportionally, and a hazard scenario's starting distance has to be chosen relative to that, not copied from a slower agent's scenario.
+
+### New regulatory checks added this round
+
+- **`iso15066_separation_distance_maintained`** — replaces the flat margin with ISO/TS 15066 Annex A's actual protective separation formula, S(t0) = Sh + Sr + Ss + C + Zd + Zr. Registered alongside the original flat-margin check; either can block. At this parameterization the original flat margin is actually the *more* conservative of the two (governs first) — not a bug, just worth knowing before assuming the newer formula is always the binding one.
+- **`iso15066_power_force_limiting`** — a simplified proxy for the standard's biomechanical force-limiting intent (estimated transient contact force from effective mass and relative speed), gated to only apply when an agent is within a plausible contact range. Found and fixed a real bug the moment it was wired in: the first version had no proximity gate at all, so a tracked agent 7m away still failed the check as if a collision were imminent.
+- **`reduced_speed_near_human`** — an ISO 10218 / ANSI-RIA R15.06 style collaborative speed cap: commanded speed must drop below a configured limit whenever any tracked agent is within a defined zone, independent of the separation-distance calculation.
+
+All three carry the same caveat as the rest of this section: representative literature defaults for the *structure* of each calculation, not certified figures — see Regulatory Mapping above.
+
+**A regulatory category this harness doesn't address at all, flagged rather than solved:** tracking real human positions and logging every decision means this system processes personal data. Data protection law (GDPR, CCPA, and similar) is a genuinely different regulatory axis from safety standards — retention limits, anonymization, consent — and nothing here handles it. A real deployment tracking real people needs this addressed separately from everything in this design doc.
+
+## Part 7 — Roadmap, Compliance & Change Log
+
+What's next, the commercialization case, prior art, and the version history.
+
+## Development Roadmap
+
+Build the contract first, prove the abstraction holds with a second implementation before scaling to many, and don't touch real hardware until everything below it is already validated. Each stage gates the next.
+
+1. **Freeze the data contract.** `WorldState`, `PredictedTrajectory`, `Action`, and `Decision` — before writing the engine. Changing this later is expensive once adapters exist against it; get it reviewed and versioned from the start.
+2. **Build the decision engine in isolation.** The precondition-check library and the trajectory forward-check, tested entirely against hand-constructed `WorldState` fixtures — no robot, no adapter, no perception noise. This is where the testing strategy earns its cost, before there's anything real to break.
+3. **Build one reference adapter against a simulator already in hand.** Privileged state, no perception noise yet — this proves the engine's logic is right before perception uncertainty is even in the picture.
+4. **Build a second adapter against a genuinely different stack** — ROS2, or a second simulator — specifically to test the abstraction, not to ship an integration. If the second adapter forces a change to the core engine or the `WorldState` schema, the boundary was wrong; better to find that with two adapters than with ten. Done (2026-09-27): ANYmal-C running Isaac Lab's navigation task, via safety\_harness/adapters/isaac\_lab\_anymal.py -- see the Robot Self-Limits and Stress Testing sections for what it found.
+5. **Harden.** The conformance test suite, schema versioning with a migration path, packaging, and the documentation above — all before a third integration, so every integration after this one follows a stable contract.
+6. **Pilot against real perception, no real actuation yet.** Feed the engine a live camera and tracker on a stationary or simulated robot, and confirm the default-deny behavior degrades gracefully under real sensor noise — confidence gating is the piece most likely to surprise you once it meets real data.
+7. **Pilot on real hardware, one action type, supervised.** A human at a reachable kill switch, the lowest-risk action type only, watching the decision log — exactly as in Getting Started — before adding a second action type or removing supervision.
+
+## Commercialization
+
+A per-implementation license on the core engine alone is a weak model: the engine is built from published control theory and planning concepts (Prior Art and Open Questions), so a well-resourced customer can read this document and reimplement it. The defensible value sits elsewhere.
+
+What's actually monetizable, in roughly increasing order of moat strength:
+
+- **Adapter breadth.** Pre-built, tested adapters across robot stacks (Stack-by-Stack Integration) are real, ongoing engineering cost — cheap to amortize across many customers, expensive for any one customer to justify building alone.
+- **Certification packaging.** Mapping the conformance test suite's evidence to ISO 10218/15066 clauses, so a customer's path to regulatory or insurance approval is faster through this than built in-house — the TÜV/UL pattern, applied to this product rather than sold as raw software.
+- **An aggregated precondition-rule library.** As deployments run through the correction loop (Logging, Escalation and the Correction Loop), anonymized, consented learnings improve the shared rule library for every customer — a network effect, hardest to bootstrap, strongest once it exists.
+- **Liability or insurance backing.** If certification carries actual insurance-backed protection, that's real pricing power — but a materially bigger, more regulated business than the module itself.
+
+**Recommended structure: open-core.** Release the data contract and the decision engine openly — this builds adoption and makes it the reference implementation others get compared against — and charge for adapters, certification packaging, the aggregated rule library, and support.
+
+**Timing.** There is currently no regulatory mandate forcing physical AI companies to buy a third-party safety layer. That has historically changed abruptly once a technology category matures — autonomous vehicles are the recent precedent — and compliance tooling that existed before the mandate tends to become the incumbent once it arrives. The bet is adoption now, monetization once (if) the category is regulated, which argues for giving the core away rather than licensing it.
+
+This has not been checked against the market: no review yet of existing competitors or actual customer demand.
+
+## Release & Distribution
+
+**Decision (2026-09-26): open the reference engine, the four adapter interfaces, and the conformance test suite under Apache License 2.0. This supersedes the per-implementation license-fee model above** as the primary monetization path once this reaches other robot makers, for one reason: this is a safety gate other people's robots will depend on, and a closed, licensed core is a much harder trust story than an inspectable one. Precedent for safety-relevant infrastructure (OpenSSL, Kubernetes, most functional-safety tooling) backs this — credibility that drives adoption comes from being auditable, not from being paid-for.
+
+**What's open:** `safety_harness/` (schema, engine, action-schema registry, precondition checks), the four adapter interfaces, and `tests/` (the mutation, random-fuzz, and reflection-driven black-box suites) — all Apache-2.0, in the repo alongside this doc (`LICENSE`, `NOTICE`, `pyproject.toml`, `README.md`). Apache 2.0 specifically for the explicit patent grant: cross-vendor safety infrastructure is exactly the case where an implicit-patent-license gap (which a plain MIT/BSD license leaves open) matters.
+
+**What's monetized instead:** certification/audit services (running the conformance suite against a vendor's adapter and issuing a certification mark — nothing here does that today, it's the Roadmap item this decision points toward), enterprise support and SLA-backed response for production deployments, and hosted compliance dashboards aggregating `Decision` logs across a fleet. None of these gate the code itself.
+
+**Publishing mechanics, in order:**
+
+1. Public GitHub repo: github.com/naganumakr/safety-harness (done).
+2. PyPI package: safety-harness, through 0.2.2 (done -- published via the repo's Trusted Publisher workflow on each tagged GitHub Release).
+3. A published "certified adapters" registry: any robot maker's adapter that passes the black-box + fuzz suites unmodified gets listed — this is the actual "integrated into every robot's code" path, since it doesn't require them to fork or relicense anything.
+4. Independent functional-safety assessment (see Scope & Non-Goals) before calling any of this "certified" rather than "reference implementation" — publishing the code doesn't substitute for this, and claiming compliance without it is the fastest way to lose the trust this whole strategy depends on.
+
+## Prior Art and Open Questions
+
+This design assembles established concepts rather than inventing new ones:
+
+- **Simplex architecture / runtime assurance** (safety-critical control) — pairing an unverified performance controller with a simpler, verified safety controller and a switching monitor.
+- **Control Barrier Functions** (Ames et al.) — the formal basis for the trajectory forward-check.
+- **Shielding** (safe reinforcement learning) — a module between policy and actuator with authority to override.
+- **STRIPS/PDDL action schemas** (classical AI planning) — the precondition/effect structure borrowed for the per-action-type table.
+- **Speed-and-separation monitoring** (ISO/TS 15066, collaborative robot safety) — reimagined here as perception-driven software rather than a dedicated hardware sensor.
+
+Open questions this design doesn't resolve:
+
+- **Calibrated confidence.** Current perception and policy models are generally not well-calibrated — a confidence score from an object detector, or an action head's sample variance, is a proxy, not a guarantee. The default-deny principle tolerates a bad proxy by erring toward blocking, but a systematically overconfident model would erode that margin.
+- **Precondition coverage is still human-authored, per action type.** Missing a precondition for a new action type is a real gap — the harness only protects against what its schema anticipates for that action, even though it doesn't need to anticipate every hazard.
+- **Latency budget.** The forward-check must complete within the control loop's cycle time; on a fast-moving humanoid this constrains how far ahead it can afford to simulate.
+- **This is not a substitute for hardware-level safety** — the E-stop, torque-limited joints, and watchdog timers discussed earlier. This is the software layer that sits above that floor, not a replacement for it.
+
+## Version History
+
+| Version | What changed |
+| --- | --- |
+| 0.1.0 | Initial data contract and engine: `WorldState`/`Action`/`Decision`, default-deny `ActuatorGate.gate()`, the four adapter interfaces, first precondition checks (object pose/hazard/clearance, swept-path-vs-agents, visibility). |
+| 0.1.x (unreleased, built up this session) | Object & placement safety fields and checks (`fall_consequence`, `drop_tolerance_m`, `supported_stably`, destination-clearance). Robot self-limit fields (joint position/velocity/effort limits, motor temperature, cartesian speed cap, battery charge fraction) and the 6 kinematic/electrical/balance checks plus 1 battery check — registered, not yet wired into the example schema (see Scope & Non-Goals). ISO/TS 15066 separation-distance and power-force-limiting checks, plus reduced-speed-near-human. Environmental checks: visibility, surface hazards, multi-agent human + pet scenarios. Mutation, random-fuzz, pathological-input, and reflection-driven black-box contract test suites. Live Isaac Lab validation, 7 hazard-scenario videos, 5 environmental/regulatory hazard videos. |
+| 0.2.0 (this revision) | `SCHEMA_VERSION` bumped from 0.1.0 — the constant had not been incremented despite everything added above. Document reorganized into this product-spec-sheet structure; added Scope & Non-Goals, Worked Examples, and this Version History. |
+| 0.2.0 (release model) | Release & Distribution decision: Apache License 2.0 for the engine, adapter interfaces, and conformance suite; monetization moved from per-implementation licensing to certification/audit services and enterprise support. LICENSE, NOTICE, pyproject.toml, and README.md added to the repo. Published as of 2026-09-27: github.com/naganumakr/safety-harness (public, CI green) and PyPI (safety-harness, through 0.2.2). |
+| 0.2.0 (adversarial stress-test pass, 2026-09-27) | NaN-sensor stress test found a systemic default-deny bypass: comparison-based checks ("<"/">" against a sensor float) silently pass on NaN. Confirmed standalone in mass\_within\_force\_budget; confirmed on the confidence field in object\_hazard\_confirmed/object\_pose\_confirmed; confirmed compound (full gate() PERMIT next to an under-tracked agent) via swept\_path\_clear\_of\_agents + iso15066\_separation\_distance\_maintained + iso15066\_power\_force\_limiting's own related bug; confirmed latent in balance\_margin\_maintained. Fixed in preconditions.py, validated locally/remote-Python/live-Isaac-Sim, and released as v0.2.2 (PyPI + GitHub). See tests/test\_adversarial\_stress.py and the section above. |
+| 0.2.x (second-adapter pass, 2026-09-27) | Development Roadmap stage 4: a second adapter (ANYmal-C, Isaac Lab navigation task) against a genuinely different robot -- a moving base, not a fixed arm. New \`navigate\` action type wires balance\_margin\_maintained for the first time. That activation found and fixed a real bug in \_distance\_to\_polygon\_edge (nearest-vertex distance grew, rather than shrank, once a point moved outside the polygon -- replaced with a proper signed convex-hull distance). Also documented a real naming finding: the base's pose is reported through RobotProprioception.end\_effector\_pose, since no less Franka-specific field exists -- flagged as a follow-up, not fixed here. Verified locally, on the GPU box's own Python, and against a live running Isaac-Navigation-Flat-Anymal-C-v0 environment. See tests/test\_anymal\_adapter.py. |
+
+The code's `SCHEMA_VERSION` constant (`safety_harness/schema.py`) tracks the data contract specifically; this table tracks the whole system. They're expected to move together but aren't the same axis — tightening an existing threshold doesn't need a schema bump, but adding or removing a dataclass field does.

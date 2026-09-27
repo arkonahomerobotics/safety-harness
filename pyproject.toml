@@ -29,7 +29,7 @@ classifiers = [
 Homepage = "https://github.com/naganumakr/safety-harness"
 Repository = "https://github.com/naganumakr/safety-harness"
 Issues = "https://github.com/naganumakr/safety-harness/issues"
-"Design doc" = "https://claude.ai/artifact/V1cBKhjD94CZBj4D8kQjdU"
+"Design doc" = "https://github.com/naganumakr/safety-harness/blob/main/docs/design.md"
 
 [tool.setuptools.packages.find]
 include = ["safety_harness*"]

@@ -10,7 +10,7 @@ register — must earn a `PERMIT` from measured, structured evidence before it e
 evidence, or a failed check, or an adapter that raises: `BLOCK`. Permission, not detection.
 
 Full design spec, architecture, worked examples, test/validation record, and roadmap:
-**[Perception-Grounded Safety Harness for Physical AI — design doc](https://claude.ai/artifact/V1cBKhjD94CZBj4D8kQjdU)**.
+**[Perception-Grounded Safety Harness for Physical AI — design doc](docs/design.md)**.
 
 ## Status
 
