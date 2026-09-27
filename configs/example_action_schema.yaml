@@ -7,11 +7,19 @@
 # What the next-safety-checks additions require from an integration (each default-denies without it):
 #   - perception: WorldState.sensor_timestamp (sensor_data_fresh) and WorldState.observed_regions
 #     (swept_path_observed). The Franka and ANYmal reference adapters report both.
-#   - the proposer: params.grip_force_n on every grasp (payload_and_grip_force_within_limits).
+#   - perception: RobotProprioception.joint_position_limits (a None entry explicitly exempts a joint
+#     designed to rest on its stop, e.g. gripper fingers) and max_cartesian_speed_mps
+#     (joint_position_limits_respected, cartesian_speed_within_limits). All three reference adapters
+#     report both. Note joint_position_limits_respected checks the joint state the dynamics adapter
+#     carries on each predicted point -- with the reference adapters, the current state only.
+#   - the proposer: params.grip_force_n on every grasp (payload_and_grip_force_within_limits), and
+#     params.duration_s or params.commanded_speed_mps when the controller's speed isn't the dynamics
+#     adapter's configured fallback -- that's what cartesian_speed_within_limits and every swept-path
+#     check see.
 #   - the integration: a pinned known-good digest of this file, passed as
 #     ActionSchemaRegistry.from_yaml(path, expected_digest=...) (config_integrity_verified). The
 #     digest for this exact file ships next to it as example_action_schema.yaml.sha256; regenerate
-#     it with `python -m safety_harness.pin configs/example_action_schema.yaml` after any
+#     it with `python -m safety_harness.pin configs/example_action_schema.yaml > configs/example_action_schema.yaml.sha256` after any
 #     reviewed change. A registry loaded without a pin blocks every action.
 #   - the actuator side: execute only what DecisionWatchdog.command() returns (or call
 #     integrity.verify_decision_action before sending) -- the execution-time half of command
@@ -85,6 +93,11 @@ action_types:
           min_visibility: 0.5
       - name: environment_hazard_clear
         kwargs: {}
+      - name: joint_position_limits_respected
+        kwargs:
+          safety_margin: 0.02
+      - name: cartesian_speed_within_limits
+        kwargs: {}
       - name: config_integrity_verified
         kwargs: {}
       - name: command_integrity_verified
@@ -131,6 +144,11 @@ action_types:
           min_visibility: 0.5
       - name: environment_hazard_clear
         kwargs: {}
+      - name: joint_position_limits_respected
+        kwargs:
+          safety_margin: 0.02
+      - name: cartesian_speed_within_limits
+        kwargs: {}
       - name: config_integrity_verified
         kwargs: {}
       - name: command_integrity_verified
@@ -161,6 +179,11 @@ action_types:
       - name: visibility_above_threshold
         kwargs:
           min_visibility: 0.5
+      - name: joint_position_limits_respected
+        kwargs:
+          safety_margin: 0.02
+      - name: cartesian_speed_within_limits
+        kwargs: {}
       - name: config_integrity_verified
         kwargs: {}
       - name: command_integrity_verified
@@ -172,6 +195,9 @@ action_types:
   # For a moving-base robot (Isaac-Navigation-Flat-Anymal-C-v0 via
   # safety_harness/adapters/isaac_lab_anymal.py) -- the swept-volume checks below now gate the
   # robot's own body sweeping toward a nav goal, not an end-effector reaching for an object.
+  # joint_position_limits_respected is deliberately NOT wired here: the Isaac Lab ANYmal-C asset
+  # defines no leg-joint position limits (every joint -inf..inf), so there is nothing real to check
+  # against. Wire it once the perception adapter reports ANYmal-C's datasheet joint ranges.
   # stability_margin_maintained is the formalized, robot-general version of balance_margin_maintained
   # (still registered under that legacy name): static support-polygon margin plus a capture-point
   # margin, which needs center_of_mass_velocity -- the ANYmal adapter reports its base velocity.
@@ -209,6 +235,8 @@ action_types:
         kwargs:
           min_visibility: 0.5
       - name: environment_hazard_clear
+        kwargs: {}
+      - name: cartesian_speed_within_limits
         kwargs: {}
       - name: config_integrity_verified
         kwargs: {}

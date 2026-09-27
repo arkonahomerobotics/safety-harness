@@ -29,7 +29,7 @@ from ..schema import (
     TrajectoryPoint,
     WorldState,
 )
-from ._isaac_lab_common import quat_xyzw_to_wxyz
+from ._isaac_lab_common import commanded_speed_mps, joint_position_limits, quat_xyzw_to_wxyz
 from .base import DynamicsAdapter, PerceptionAdapter
 
 # The training cubes are plastic/foam props with no real fragility, but there is no perception
@@ -48,6 +48,11 @@ STABLE_HEIGHT_TOLERANCE_M = 0.01
 # Franka Emika Panda datasheet payload -- a published robot rating, reported so
 # payload_and_grip_force_within_limits holds this robot to its own figure, not only a config's.
 FRANKA_PANDA_RATED_PAYLOAD_KG = 3.0
+# Franka Emika Panda datasheet Cartesian (translational) end-effector velocity limit.
+FRANKA_PANDA_MAX_CARTESIAN_SPEED_MPS = 1.7
+# The two finger joints rest on their stops whenever the gripper is fully open or closed -- by
+# design, not a limit hazard -- so they're explicitly exempted from joint_position_limits_respected.
+FRANKA_JOINT_LIMIT_EXEMPT = ("panda_finger",)
 # Privileged simulator state is omniscient: every body in the scene is known exactly, so the whole
 # env-local workspace counts as observed (swept_path_observed). A generous but finite box around the
 # env origin -- a real camera-based adapter must replace this with its sensors' actual, occlusion-
@@ -123,6 +128,8 @@ class IsaacLabCubeStackPerceptionAdapter(PerceptionAdapter):
             center_of_mass=None,  # fixed-base arm: no whole-body balance constraint
             support_polygon=None,
             rated_payload_kg=FRANKA_PANDA_RATED_PAYLOAD_KG,
+            joint_position_limits=joint_position_limits(robot, i, FRANKA_JOINT_LIMIT_EXEMPT),
+            max_cartesian_speed_mps=FRANKA_PANDA_MAX_CARTESIAN_SPEED_MPS,
         )
 
         return WorldState(
@@ -155,11 +162,13 @@ class IsaacLabCubeStackDynamicsAdapter(DynamicsAdapter):
             raise ValueError(f"action {action.action_type!r} has no target_position; cannot predict a trajectory")
         target = action.params["target_position"]
         dist = _dist(start, target)
+        # the speed the action actually commands; the configured cap is only the fallback (see helper)
+        speed = commanded_speed_mps(action, dist, self._max_speed)
         n = max(2, self._n_points)
         points = []
         for k in range(n):
             t = horizon_s * k / (n - 1)
-            frac = 0.0 if dist < 1e-6 else min(1.0, (self._max_speed * t) / dist)
+            frac = 0.0 if dist < 1e-6 else min(1.0, (speed * t) / dist)
             center = tuple(s + frac * (g - s) for s, g in zip(start, target))
             points.append(
                 TrajectoryPoint(

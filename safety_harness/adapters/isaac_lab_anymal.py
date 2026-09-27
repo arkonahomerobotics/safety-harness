@@ -42,7 +42,7 @@ from ..schema import (
     TrajectoryPoint,
     WorldState,
 )
-from ._isaac_lab_common import quat_xyzw_to_wxyz
+from ._isaac_lab_common import commanded_speed_mps, joint_position_limits, quat_xyzw_to_wxyz
 from .base import DynamicsAdapter, PerceptionAdapter
 
 # ANYmal-C's four foot body names, in this task's fixed body ordering (LF/LH/RF/RH = left-front,
@@ -57,6 +57,9 @@ FOOT_BODY_NAMES = ("LF_FOOT", "LH_FOOT", "RF_FOOT", "RH_FOOT")
 BODY_FOOTPRINT_RADIUS_M = 0.35
 
 DEFAULT_MAX_BASE_SPEED_MPS = 1.0  # ANYmal-C's typical commanded walking speed; conservative vs. its rated max
+# Base speed the harness holds this robot to (cartesian_speed_within_limits) -- ANYmal-C's nominal
+# maximum walking speed; override with a deployment's own rating.
+ANYMAL_C_MAX_BASE_SPEED_MPS = 1.0
 
 # Privileged simulator state is omniscient -- see isaac_lab.py's PRIVILEGED_STATE_OBSERVED_REGION for
 # why the whole env-local area counts as observed here and why a real sensor adapter must not copy
@@ -113,6 +116,11 @@ class IsaacLabAnymalNavPerceptionAdapter(PerceptionAdapter):
             # docstring uses for the support-polygon distance calculation itself.
             center_of_mass=tuple(base_pos),
             support_polygon=support_polygon,
+            # None here: the Isaac Lab ANYmal-C asset defines no leg-joint limits (see helper), so the
+            # navigate action type doesn't wire joint_position_limits_respected -- a real deployment
+            # must report ANYmal-C's datasheet joint ranges before it can.
+            joint_position_limits=joint_position_limits(robot, i),
+            max_cartesian_speed_mps=ANYMAL_C_MAX_BASE_SPEED_MPS,
             center_of_mass_velocity=tuple(base_vel),
         )
 
@@ -152,11 +160,12 @@ class IsaacLabAnymalNavDynamicsAdapter(DynamicsAdapter):
             raise ValueError(f"action {action.action_type!r} has no target_position; cannot predict a trajectory")
         target = action.params["target_position"]
         dist = _dist(start, target)
+        speed = commanded_speed_mps(action, dist, self._max_speed)  # commanded, not assumed (see helper)
         n = max(2, self._n_points)
         points = []
         for k in range(n):
             t = horizon_s * k / (n - 1)
-            frac = 0.0 if dist < 1e-6 else min(1.0, (self._max_speed * t) / dist)
+            frac = 0.0 if dist < 1e-6 else min(1.0, (speed * t) / dist)
             center = tuple(s + frac * (g - s) for s, g in zip(start, target))
             points.append(
                 TrajectoryPoint(

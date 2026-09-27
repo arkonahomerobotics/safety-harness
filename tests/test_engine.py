@@ -415,7 +415,7 @@ class RobotKinematicElectricalLimitTests(unittest.TestCase):
         return PredictedTrajectory(points=tuple(points), horizon_s=horizon_s)
 
     def test_joint_position_limits_default_deny_without_limits(self):
-        result = pc.joint_position_limits_respected(None, None, self._traj(fixtures.robot_state()))
+        result = pc.joint_position_limits_respected(None, None, self._traj(fixtures.robot_state(report_wired_limits=False)))
         self.assertFalse(result.satisfied)
 
     def test_joint_position_limits_permit_within_range(self):
@@ -469,7 +469,7 @@ class RobotKinematicElectricalLimitTests(unittest.TestCase):
         self.assertTrue(result.satisfied)
 
     def test_cartesian_speed_default_deny_without_limit(self):
-        result = pc.cartesian_speed_within_limits(None, None, self._traj(fixtures.robot_state()))
+        result = pc.cartesian_speed_within_limits(None, None, self._traj(fixtures.robot_state(report_wired_limits=False)))
         self.assertFalse(result.satisfied)
 
     def test_cartesian_speed_block_when_too_fast(self):

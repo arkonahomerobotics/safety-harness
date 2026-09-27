@@ -1,0 +1,103 @@
+[
+ {
+  "label": "nominal: clear path, real standing geometry",
+  "kind": "nominal",
+  "expect": "permit",
+  "verdict": "permit",
+  "fired": [],
+  "pass": true
+ },
+ {
+  "label": "human 1.5m ahead on the path (swept_path_clear_of_agents)",
+  "kind": "injected-agent",
+  "expect": "swept_path_clear_of_agents",
+  "verdict": "block",
+  "fired": [
+   "swept_path_clear_of_agents",
+   "iso15066_separation_distance_maintained",
+   "vulnerable_bystander_protected",
+   "reduced_speed_near_human"
+  ],
+  "pass": true
+ },
+ {
+  "label": "human 1.5m ahead on the path (iso15066_separation_distance_maintained)",
+  "kind": "injected-agent",
+  "expect": "iso15066_separation_distance_maintained",
+  "verdict": "block",
+  "fired": [
+   "swept_path_clear_of_agents",
+   "iso15066_separation_distance_maintained",
+   "vulnerable_bystander_protected",
+   "reduced_speed_near_human"
+  ],
+  "pass": true
+ },
+ {
+  "label": "human 1.5m ahead on the path (reduced_speed_near_human)",
+  "kind": "injected-agent",
+  "expect": "reduced_speed_near_human",
+  "verdict": "block",
+  "fired": [
+   "swept_path_clear_of_agents",
+   "iso15066_separation_distance_maintained",
+   "vulnerable_bystander_protected",
+   "reduced_speed_near_human"
+  ],
+  "pass": true
+ },
+ {
+  "label": "control: human 8m off to the side",
+  "kind": "nominal",
+  "expect": "permit",
+  "verdict": "permit",
+  "fired": [],
+  "pass": true
+ },
+ {
+  "label": "feet slipped clear of the CoM (static margin)",
+  "kind": "injected",
+  "expect": "stability_margin_maintained",
+  "verdict": "block",
+  "fired": [
+   "stability_margin_maintained"
+  ],
+  "pass": true
+ },
+ {
+  "label": "real feet, CoM moving 1.5 m/s toward the front edge (capture point)",
+  "kind": "injected",
+  "expect": "stability_margin_maintained",
+  "verdict": "block",
+  "fired": [
+   "stability_margin_maintained"
+  ],
+  "pass": true
+ },
+ {
+  "label": "adapter reports ANYmal-C joint limits as unreported (asset defines none)",
+  "kind": "adapter",
+  "expect": "None",
+  "verdict": "None",
+  "fired": [],
+  "pass": true
+ },
+ {
+  "label": "navigate commanded at 3.0 m/s (rated 1.0)",
+  "kind": "commanded",
+  "expect": "cartesian_speed_within_limits",
+  "verdict": "block",
+  "fired": [
+   "cartesian_speed_within_limits"
+  ],
+  "pass": true
+ },
+ {
+  "label": "control: navigate commanded at 0.8 m/s",
+  "kind": "nominal",
+  "expect": "permit",
+  "verdict": "permit",
+  "fired": [],
+  "pass": true
+ }
+]

@@ -48,7 +48,7 @@ from ..schema import (
     TrajectoryPoint,
     WorldState,
 )
-from ._isaac_lab_common import quat_xyzw_to_wxyz
+from ._isaac_lab_common import commanded_speed_mps, joint_position_limits, quat_xyzw_to_wxyz
 from .base import DynamicsAdapter, PerceptionAdapter
 
 # The object is a real prop from Isaac Lab's own Mimic pick-place assets (steering_wheel.usd), not
@@ -77,6 +77,12 @@ DEFAULT_MAX_HAND_SPEED_MPS = 0.4
 # Conservative single-arm payload for the G1 (a reference figure, not a datasheet guarantee --
 # override for a real deployment). Reported so payload_and_grip_force_within_limits applies it.
 G1_ARM_RATED_PAYLOAD_KG = 2.0
+# Hand speed the harness holds the G1 to (cartesian_speed_within_limits); a conservative reference
+# figure, not a datasheet rating.
+G1_MAX_HAND_SPEED_MPS = 1.0
+# Dex3 finger joints rest at their stops when open (every hand joint reads 0.0 at rest, at or next to
+# a soft limit) -- exempted explicitly, like the Franka's gripper fingers.
+G1_JOINT_LIMIT_EXEMPT = ("_hand_",)
 # Privileged simulator state is omniscient, so the whole env-local volume counts as observed
 # (swept_path_observed). A camera-based adapter must replace this with real, occlusion-aware coverage.
 # Note the floor at z=-1: a table-top-only region made swept_path_observed block ~98% of nominal
@@ -133,6 +139,8 @@ class IsaacLabG1PickPlacePerceptionAdapter(PerceptionAdapter):
             center_of_mass=None,  # not wired -- see module docstring on the two-point-stance gap
             support_polygon=None,
             rated_payload_kg=G1_ARM_RATED_PAYLOAD_KG,
+            joint_position_limits=joint_position_limits(robot, i, G1_JOINT_LIMIT_EXEMPT),
+            max_cartesian_speed_mps=G1_MAX_HAND_SPEED_MPS,
         )
 
         obj_pos = (obj.data.root_pos_w.torch[i] - origin).tolist()
@@ -191,11 +199,12 @@ class IsaacLabG1HandDynamicsAdapter(DynamicsAdapter):
             raise ValueError(f"action {action.action_type!r} has no target_position; cannot predict a trajectory")
         target = action.params["target_position"]
         dist = _dist(start, target)
+        speed = commanded_speed_mps(action, dist, self._max_speed)  # commanded, not assumed (see helper)
         n = max(2, self._n_points)
         points = []
         for k in range(n):
             t = horizon_s * k / (n - 1)
-            frac = 0.0 if dist < 1e-6 else min(1.0, (self._max_speed * t) / dist)
+            frac = 0.0 if dist < 1e-6 else min(1.0, (speed * t) / dist)
             center = tuple(s + frac * (g - s) for s, g in zip(start, target))
             points.append(
                 TrajectoryPoint(
