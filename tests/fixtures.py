@@ -5,6 +5,7 @@ design doc).
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 
 from safety_harness.schema import (
@@ -12,6 +13,7 @@ from safety_harness.schema import (
     EnvironmentSignals,
     FallConsequence,
     HazardTag,
+    ObservedRegion,
     Pose,
     PredictedTrajectory,
     RobotProprioception,
@@ -20,6 +22,16 @@ from safety_harness.schema import (
     TrajectoryPoint,
     WorldState,
 )
+
+
+# What perception actually observed, for swept_path_observed: the whole tabletop workspace around the
+# fixture trajectory (0.5, 0, 0.3) -> (0.5, 0, 0.05), and a nav-sized area for the quadruped.
+WORKSPACE_OBSERVED = (ObservedRegion(min_corner=(-1.0, -1.0, -0.5), max_corner=(2.0, 1.0, 1.5)),)
+NAV_AREA_OBSERVED = (ObservedRegion(min_corner=(-2.0, -3.0, -0.5), max_corner=(6.0, 3.0, 2.0)),)
+
+# A safe commanded grip for the 0.05kg fragile training cube: above the ~1.6N needed to hold it,
+# below the 15N fragile-object cap (payload_and_grip_force_within_limits).
+SAFE_GRIP_FORCE_N = 5.0
 
 
 def robot_state(ee_position=(0.5, 0.0, 0.3)) -> RobotProprioception:
@@ -152,6 +164,7 @@ def stale_agent(agent_id="person_1") -> TrackedAgent:
 
 def quadruped_robot_state(
     base_position=(0.0, 0.0, 0.6), support_polygon=((0.3, 0.2), (0.3, -0.2), (-0.3, 0.2), (-0.3, -0.2)),
+    com_velocity=(0.0, 0.0, 0.0),
 ) -> RobotProprioception:
     """A legged robot's own state: base position standing in for center of mass (documented
     simplification -- see isaac_lab_anymal.py), and a real four-foot support polygon centered under
@@ -164,6 +177,7 @@ def quadruped_robot_state(
         gripper_state=0.0,
         center_of_mass=base_position,
         support_polygon=support_polygon,
+        center_of_mass_velocity=com_velocity,
     )
 
 
@@ -181,8 +195,11 @@ def navigate_action(target_position=(3.0, 0.0, 0.6)) -> Action:
     return Action(action_type="navigate", params={"target_position": target_position})
 
 
-def grasp_action(object_id="cube_2", target_position=(0.5, 0.0, 0.05)) -> Action:
-    return Action(action_type="grasp", params={"object_id": object_id, "target_position": target_position})
+def grasp_action(object_id="cube_2", target_position=(0.5, 0.0, 0.05), grip_force_n=SAFE_GRIP_FORCE_N) -> Action:
+    params = {"object_id": object_id, "target_position": target_position}
+    if grip_force_n is not None:
+        params["grip_force_n"] = grip_force_n
+    return Action(action_type="grasp", params=params)
 
 
 def place_action(object_id="cube_2", target_surface_id="cube_1", target_position=(0.5, 0.0, 0.05)) -> Action:
@@ -202,12 +219,16 @@ def straight_line_trajectory(start=(0.5, 0.0, 0.3), end=(0.5, 0.0, 0.05), horizo
     return PredictedTrajectory(points=tuple(points), horizon_s=horizon_s)
 
 
-def base_world_state(objects=(), agents=(), visibility=1.0) -> WorldState:
+def base_world_state(objects=(), agents=(), visibility=1.0, sensor_age_s=0.0, observed_regions=WORKSPACE_OBSERVED) -> WorldState:
+    """Sensor data captured ``sensor_age_s`` ago (fresh by default) with the whole tabletop
+    workspace observed -- the positive case for sensor_data_fresh and swept_path_observed."""
     return WorldState(
         objects=objects,
         agents=agents,
         robot=robot_state(),
         environment=EnvironmentSignals(visibility_confidence=visibility),
+        sensor_timestamp=time.time() - sensor_age_s,
+        observed_regions=observed_regions,
     )
 
 
@@ -217,4 +238,6 @@ def quadruped_world_state(agents=(), visibility=1.0, robot=None) -> WorldState:
         agents=agents,
         robot=robot if robot is not None else quadruped_robot_state(),
         environment=EnvironmentSignals(visibility_confidence=visibility),
+        sensor_timestamp=time.time(),
+        observed_regions=NAV_AREA_OBSERVED,
     )

@@ -1,13 +1,16 @@
 from .action_schema import ActionSchemaRegistry
 from .engine import ActuatorGate, PerceptionFailure
+from .integrity import ConfigIntegrityError, UnverifiableError, seal_action, verify_action_seal, verify_decision_action
 from .schema import (
     SCHEMA_VERSION,
     Action,
+    AgentCategory,
     Decision,
     DecisionVerdict,
     EnvironmentSignals,
     FallConsequence,
     HazardTag,
+    ObservedRegion,
     Pose,
     PredictedTrajectory,
     PreconditionResult,
@@ -17,18 +20,27 @@ from .schema import (
     TrajectoryPoint,
     WorldState,
 )
+from .watchdog import DecisionWatchdog
 
 __all__ = [
     "ActionSchemaRegistry",
     "ActuatorGate",
     "PerceptionFailure",
+    "DecisionWatchdog",
+    "ConfigIntegrityError",
+    "UnverifiableError",
+    "seal_action",
+    "verify_action_seal",
+    "verify_decision_action",
     "SCHEMA_VERSION",
     "Action",
+    "AgentCategory",
     "Decision",
     "DecisionVerdict",
     "EnvironmentSignals",
     "FallConsequence",
     "HazardTag",
+    "ObservedRegion",
     "Pose",
     "PredictedTrajectory",
     "PreconditionResult",

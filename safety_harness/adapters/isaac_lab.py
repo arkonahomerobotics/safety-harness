@@ -14,11 +14,14 @@ this project's other Isaac Lab scripts, but it has not been executed or unit-tes
 
 from __future__ import annotations
 
+import time
+
 from ..schema import (
     Action,
     EnvironmentSignals,
     FallConsequence,
     HazardTag,
+    ObservedRegion,
     Pose,
     PredictedTrajectory,
     RobotProprioception,
@@ -26,6 +29,7 @@ from ..schema import (
     TrajectoryPoint,
     WorldState,
 )
+from ._isaac_lab_common import quat_xyzw_to_wxyz
 from .base import DynamicsAdapter, PerceptionAdapter
 
 # The training cubes are plastic/foam props with no real fragility, but there is no perception
@@ -41,6 +45,14 @@ CUBE_CLEARED_FOR_INTERACTION = True
 CUBE_FALL_CONSEQUENCE = FallConsequence.NONE
 STABLE_REST_HEIGHT_M = 0.0203  # established scene fact: cube center height at rest, above env origin
 STABLE_HEIGHT_TOLERANCE_M = 0.01
+# Franka Emika Panda datasheet payload -- a published robot rating, reported so
+# payload_and_grip_force_within_limits holds this robot to its own figure, not only a config's.
+FRANKA_PANDA_RATED_PAYLOAD_KG = 3.0
+# Privileged simulator state is omniscient: every body in the scene is known exactly, so the whole
+# env-local workspace counts as observed (swept_path_observed). A generous but finite box around the
+# env origin -- a real camera-based adapter must replace this with its sensors' actual, occlusion-
+# aware coverage, never carry this assumption over.
+PRIVILEGED_STATE_OBSERVED_REGION = ObservedRegion(min_corner=(-5.0, -5.0, -1.0), max_corner=(5.0, 5.0, 3.0))
 
 
 class IsaacLabCubeStackPerceptionAdapter(PerceptionAdapter):
@@ -57,6 +69,9 @@ class IsaacLabCubeStackPerceptionAdapter(PerceptionAdapter):
         self._finger_ids = finger_ids
 
     def get_world_state(self) -> WorldState:
+        # Stamped before any read: simulator state is read synchronously, so the moment reading
+        # starts is the capture time of the oldest value in this state (sensor_data_fresh).
+        sensor_timestamp = time.time()
         env = self._env
         i = self._env_index
         origin = env.scene.env_origins[i]
@@ -65,7 +80,7 @@ class IsaacLabCubeStackPerceptionAdapter(PerceptionAdapter):
         for name in self._cube_names:
             handle = env.scene[name]
             pos = (handle.data.root_pos_w.torch[i] - origin).tolist()
-            quat = handle.data.root_quat_w.torch[i].tolist()  # (w, x, y, z)
+            quat = quat_xyzw_to_wxyz(handle.data.root_quat_w.torch[i].tolist())  # Isaac Lab 3.x stores (x, y, z, w)
             vel = handle.data.root_lin_vel_w.torch[i].tolist()
             # A real, measured signal, not a fabricated assumption: not currently moving in any
             # direction, not just not-falling. The first version of this checked only vertical
@@ -107,6 +122,7 @@ class IsaacLabCubeStackPerceptionAdapter(PerceptionAdapter):
             gripper_state=gripper,
             center_of_mass=None,  # fixed-base arm: no whole-body balance constraint
             support_polygon=None,
+            rated_payload_kg=FRANKA_PANDA_RATED_PAYLOAD_KG,
         )
 
         return WorldState(
@@ -114,6 +130,8 @@ class IsaacLabCubeStackPerceptionAdapter(PerceptionAdapter):
             agents=(),  # no humans/agents tracked in this sim task
             robot=robot_state,
             environment=EnvironmentSignals(visibility_confidence=1.0),
+            sensor_timestamp=sensor_timestamp,
+            observed_regions=(PRIVILEGED_STATE_OBSERVED_REGION,),
         )
 
 

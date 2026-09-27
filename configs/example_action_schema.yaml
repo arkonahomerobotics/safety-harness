@@ -3,12 +3,35 @@
 # Isaac Lab ANYmal-C navigation task (safety_harness/adapters/isaac_lab_anymal.py). Each action type
 # lists the built-in precondition checks it must pass; an action type left out of this file is
 # blocked unconditionally (unsafe by default).
+#
+# What the next-safety-checks additions require from an integration (each default-denies without it):
+#   - perception: WorldState.sensor_timestamp (sensor_data_fresh) and WorldState.observed_regions
+#     (swept_path_observed). The Franka and ANYmal reference adapters report both.
+#   - the proposer: params.grip_force_n on every grasp (payload_and_grip_force_within_limits).
+#   - the integration: a pinned known-good digest of this file, passed as
+#     ActionSchemaRegistry.from_yaml(path, expected_digest=...) (config_integrity_verified). The
+#     digest for this exact file ships next to it as example_action_schema.yaml.sha256; regenerate
+#     it with `python -m safety_harness.pin configs/example_action_schema.yaml` after any
+#     reviewed change. A registry loaded without a pin blocks every action.
+#   - the actuator side: execute only what DecisionWatchdog.command() returns (or call
+#     integrity.verify_decision_action before sending) -- the execution-time half of command
+#     integrity and liveness, which no entry in this file can enforce on its own.
+#
+# Ordering matters for three entries, which is why they close every list: command_integrity_verified
+# and config_integrity_verified re-verify after every other check has run, and
+# decision_within_deadline, last of all, times the whole decision including them.
+# decision_within_deadline's budget and sensor_data_fresh's max age should be set to the same
+# figures passed to iso15066_separation_distance_maintained (sampling_interval_s /
+# decision_latency_s), so that check's timing assumptions are enforced rather than assumed.
 
 action_types:
   grasp:
     checks:
       - name: robot_state_confirmed
         kwargs: {}
+      - name: sensor_data_fresh
+        kwargs:
+          max_sensor_age_s: 0.2
       - name: object_hazard_confirmed
         kwargs:
           object_id_param: object_id
@@ -30,6 +53,15 @@ action_types:
         kwargs:
           object_id_param: object_id
           force_budget_kg: 3.0
+      # rated_payload_kg: Franka Panda's datasheet payload. A robot that reports its own
+      # rated_payload_kg is held to the lower of the two.
+      - name: payload_and_grip_force_within_limits
+        kwargs:
+          object_id_param: object_id
+          grip_force_param: grip_force_n
+          rated_payload_kg: 3.0
+          max_grip_force_n: 70.0
+          max_grip_force_fragile_n: 15.0
       - name: swept_path_clear_of_agents
         kwargs:
           margin_m: 0.15
@@ -37,22 +69,37 @@ action_types:
         kwargs: {}
       - name: iso15066_power_force_limiting
         kwargs: {}
+      - name: vulnerable_bystander_protected
+        kwargs: {}
       - name: reduced_speed_near_human
         kwargs: {}
       - name: swept_path_clear_of_risky_objects
         kwargs:
           object_id_param: object_id
           margin_m: 0.15
+      - name: swept_path_observed
+        kwargs:
+          margin_m: 0.15
       - name: visibility_above_threshold
         kwargs:
           min_visibility: 0.5
       - name: environment_hazard_clear
         kwargs: {}
+      - name: config_integrity_verified
+        kwargs: {}
+      - name: command_integrity_verified
+        kwargs: {}
+      - name: decision_within_deadline
+        kwargs:
+          max_decision_latency_s: 0.1
 
   place:
     checks:
       - name: robot_state_confirmed
         kwargs: {}
+      - name: sensor_data_fresh
+        kwargs:
+          max_sensor_age_s: 0.2
       - name: destination_confirmed_stable_and_clear
         kwargs:
           surface_id_param: target_surface_id
@@ -68,20 +115,35 @@ action_types:
         kwargs: {}
       - name: iso15066_power_force_limiting
         kwargs: {}
+      - name: vulnerable_bystander_protected
+        kwargs: {}
       - name: reduced_speed_near_human
         kwargs: {}
       - name: swept_path_clear_of_risky_objects
         kwargs:
           object_id_param: object_id
           margin_m: 0.15
+      - name: swept_path_observed
+        kwargs:
+          margin_m: 0.15
       - name: visibility_above_threshold
         kwargs:
           min_visibility: 0.5
       - name: environment_hazard_clear
         kwargs: {}
+      - name: config_integrity_verified
+        kwargs: {}
+      - name: command_integrity_verified
+        kwargs: {}
+      - name: decision_within_deadline
+        kwargs:
+          max_decision_latency_s: 0.1
 
   reach:
     checks:
+      - name: sensor_data_fresh
+        kwargs:
+          max_sensor_age_s: 0.2
       - name: swept_path_clear_of_agents
         kwargs:
           margin_m: 0.15
@@ -89,24 +151,42 @@ action_types:
         kwargs: {}
       - name: iso15066_power_force_limiting
         kwargs: {}
+      - name: vulnerable_bystander_protected
+        kwargs: {}
       - name: reduced_speed_near_human
         kwargs: {}
+      - name: swept_path_observed
+        kwargs:
+          margin_m: 0.15
       - name: visibility_above_threshold
         kwargs:
           min_visibility: 0.5
+      - name: config_integrity_verified
+        kwargs: {}
+      - name: command_integrity_verified
+        kwargs: {}
+      - name: decision_within_deadline
+        kwargs:
+          max_decision_latency_s: 0.1
 
   # For a moving-base robot (Isaac-Navigation-Flat-Anymal-C-v0 via
   # safety_harness/adapters/isaac_lab_anymal.py) -- the swept-volume checks below now gate the
   # robot's own body sweeping toward a nav goal, not an end-effector reaching for an object.
-  # balance_margin_maintained is wired here for the first time in this file: every other action
-  # type is a fixed-base arm, which never reports balance state at all.
+  # stability_margin_maintained is the formalized, robot-general version of balance_margin_maintained
+  # (still registered under that legacy name): static support-polygon margin plus a capture-point
+  # margin, which needs center_of_mass_velocity -- the ANYmal adapter reports its base velocity.
   navigate:
     checks:
       - name: robot_state_confirmed
         kwargs: {}
-      - name: balance_margin_maintained
+      - name: sensor_data_fresh
+        kwargs:
+          max_sensor_age_s: 0.2
+      - name: stability_margin_maintained
         kwargs:
           min_margin_m: 0.03
+          require_com_velocity: true
+          capture_step_allowance_m: 0.0
       - name: swept_path_clear_of_agents
         kwargs:
           margin_m: 0.15
@@ -114,14 +194,26 @@ action_types:
         kwargs: {}
       - name: iso15066_power_force_limiting
         kwargs: {}
+      - name: vulnerable_bystander_protected
+        kwargs: {}
       - name: reduced_speed_near_human
         kwargs: {}
       - name: swept_path_clear_of_risky_objects
         kwargs:
           object_id_param: object_id
           margin_m: 0.15
+      - name: swept_path_observed
+        kwargs:
+          margin_m: 0.15
       - name: visibility_above_threshold
         kwargs:
           min_visibility: 0.5
       - name: environment_hazard_clear
         kwargs: {}
+      - name: config_integrity_verified
+        kwargs: {}
+      - name: command_integrity_verified
+        kwargs: {}
+      - name: decision_within_deadline
+        kwargs:
+          max_decision_latency_s: 0.1

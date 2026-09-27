@@ -10,11 +10,27 @@ enforced, one function at a time.
 from __future__ import annotations
 
 import math
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
 
-from .schema import Action, FallConsequence, HazardTag, PredictedTrajectory, PreconditionResult, WorldState
+from .integrity import COMMAND_SEAL_PARAM, digests_match, key_from_env, try_action_digest, verify_action_seal
+from .schema import (
+    Action,
+    AgentCategory,
+    FallConsequence,
+    HazardTag,
+    ObservedRegion,
+    PredictedTrajectory,
+    PreconditionResult,
+    WorldState,
+)
 
 # Hazard tags that make an object risky to have nearby even when it isn't the action's target.
 _BYSTANDER_RISK_TAGS = frozenset({HazardTag.SHARP, HazardTag.HOT})
+# Hazard tags that cap how hard an object may be gripped (payload_and_grip_force_within_limits).
+_CRUSH_RISK_TAGS = frozenset({HazardTag.FRAGILE, HazardTag.LIQUID_CONTAINING})
+GRAVITY_MPS2 = 9.81
 
 MIN_CONFIDENCE = 0.6  # default confidence gate; override per rule via action_schema.yaml kwargs
 
@@ -25,6 +41,43 @@ MIN_CONFIDENCE = 0.6  # default confidence gate; override per rule via action_sc
 DEFAULT_REACTION_TIME_S = 0.15
 DEFAULT_SAMPLING_INTERVAL_S = 0.05
 REACTION_INTERVAL_S = DEFAULT_REACTION_TIME_S + DEFAULT_SAMPLING_INTERVAL_S
+
+# Timing budgets for decision_within_deadline and sensor_data_fresh, tied to the two numbers above
+# rather than invented separately. Representative values, not measured on any real system -- a
+# deployment sets both from its own characterized sensor and decision latency, and should pass the
+# same figures to iso15066_separation_distance_maintained (sampling_interval_s / decision_latency_s)
+# so that check's assumptions are enforced here instead of merely assumed there.
+#
+# A decision must finish within two sensing cycles: past that, the next sample was due and missed
+# before this decision could act on the last one.
+DEFAULT_MAX_DECISION_LATENCY_S = 2 * DEFAULT_SAMPLING_INTERVAL_S
+# Sensor capture -> end of decision must fit inside the whole reaction interval the separation
+# formula budgets: data older than that predates the entire window that formula reasons about.
+DEFAULT_MAX_SENSOR_AGE_S = REACTION_INTERVAL_S
+
+
+@dataclass(frozen=True)
+class CheckContext:
+    """Facts about the decision in progress that no WorldState, Action or PredictedTrajectory can
+    carry -- when the decision started, on what clock, what the proposed action hashed to at that
+    moment, and which configuration is running it. Supplied by ActuatorGate.gate() (or by
+    ActionSchemaRegistry.run_checks when called directly) only to checks that declare
+    ``wants_check_context``; YAML can never supply or override it. Every check that reads one fails
+    closed when called without one: "I wasn't told" is not evidence of anything."""
+
+    decision_started_at: float
+    clock: Callable[[], float]
+    checked_action_digest: Optional[str] = None
+    schema_registry: Any = None
+
+
+def _wants_check_context(fn):
+    fn.wants_check_context = True
+    return fn
+
+
+def _is_real_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _distance(a, b) -> float:
@@ -209,24 +262,122 @@ def swept_path_clear_of_agents(
     return _ok("swept_path_clear_of_agents", "no tracked agent within worst-case clearance for the full trajectory")
 
 
+def _stability_margin(
+    name: str, trajectory: PredictedTrajectory, *, min_margin_m: float, use_capture_point: bool,
+    require_com_velocity: bool, ground_height_m: float, capture_step_allowance_m: float, gravity_mps2: float,
+) -> PreconditionResult:
+    """Shared body of stability_margin_maintained and its legacy name balance_margin_maintained --
+    one implementation, so the two can never drift apart."""
+    if not trajectory.points:
+        return _fail(name, "no predicted trajectory to evaluate")
+    for point in trajectory.points:
+        robot = point.robot
+        if robot is None or robot.center_of_mass is None or robot.support_polygon is None:
+            return _fail(name, "no balance state reported -- default-deny for legged/humanoid platforms")
+        com = robot.center_of_mass
+        margin = _distance_to_polygon_edge(com[:2], robot.support_polygon)
+        if _below(margin, min_margin_m):
+            return _fail(name, f"center of mass within {margin:.3f}m of support-polygon edge at t={point.t:.2f}s")
+        if not use_capture_point:
+            continue
+        velocity = robot.center_of_mass_velocity
+        if velocity is None:
+            if require_com_velocity:
+                return _fail(
+                    name,
+                    "no center-of-mass velocity reported -- a static margin alone says nothing about "
+                    "whether a moving platform can stop inside its support polygon; default-deny",
+                )
+            continue
+        if len(com) < 3 or len(velocity) < 2:
+            return _fail(name, "center of mass / velocity malformed -- cannot compute a capture point")
+        height = com[2] - ground_height_m
+        if _at_or_within(height, 0.0) or _at_or_within(gravity_mps2, 0.0):
+            return _fail(name, f"center-of-mass height {height:.3f}m above ground is non-positive or unconfirmed")
+        omega = math.sqrt(gravity_mps2 / height)
+        capture_point = (com[0] + velocity[0] / omega, com[1] + velocity[1] / omega)
+        capture_margin = _distance_to_polygon_edge(capture_point, robot.support_polygon)
+        if _below(capture_margin, min_margin_m - capture_step_allowance_m):
+            return _fail(
+                name,
+                f"capture point {capture_margin:.3f}m from the support-polygon edge at t={point.t:.2f}s "
+                f"(needs {min_margin_m - capture_step_allowance_m:.3f}m): at this center-of-mass velocity the "
+                f"platform cannot stop inside its support polygon",
+            )
+    return _ok(name, "center of mass and capture point stayed within the safe margin throughout")
+
+
+def stability_margin_maintained(
+    state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
+    min_margin_m: float = 0.03,
+    require_com_velocity: bool = True,
+    ground_height_m: float = 0.0,
+    capture_step_allowance_m: float = 0.0,
+    gravity_mps2: float = GRAVITY_MPS2,
+) -> PreconditionResult:
+    """Tip-over / fall margin for any platform that reports a center of mass and a support polygon --
+    formalized from the ANYmal-C balance-margin logic
+    (balance_margin_maintained, kept registered under its old name as its static-only half) into one
+    named, citable check that doesn't assume anything about the robot beyond two schema fields.
+
+    Two margins, both required at every predicted point, both against the *convex hull* of the
+    reported ground contacts (_distance_to_polygon_edge -- the hull-based signed distance that
+    replaced the old nearest-vertex proxy after the ANYmal-C adapter exposed its blind spot):
+
+    * Static: the center of mass's ground projection must sit at least ``min_margin_m`` inside the
+      support polygon. This is all balance_margin_maintained ever checked, and it is only a valid
+      stability criterion for a platform that isn't moving.
+    * Dynamic: the *capture point* (the "extrapolated center of mass", Hof et al. 2005; the
+      instantaneous capture point of Pratt et al. 2006) -- ``com_xy + v_xy / omega0`` with
+      ``omega0 = sqrt(g / com_height)`` under the linear-inverted-pendulum model -- must satisfy
+      the same margin. It is where the center of mass has to be brought over to come to rest; if it
+      lies outside the support polygon, the platform cannot stop without stepping or falling, even
+      while its static projection still looks comfortably inside. That is the case a static-only
+      check permits and this one blocks.
+
+    ``require_com_velocity`` defaults to True: a platform that reports balance state but not the
+    velocity needed for the dynamic half is default-denied rather than silently downgraded to the
+    static half. ``capture_step_allowance_m`` (default 0.0 = must be able to stop without taking a
+    step at all, the conservative case) lets a legged platform whose controller can take a
+    recovery step allow the capture point that far outside its current support polygon -- a
+    one-step capturability approximation, to be set from the platform's characterized step length,
+    not guessed.
+
+    Scope of the dynamic half: the capture point is an inverted-pendulum criterion, right for
+    legged and humanoid platforms. A rigid wheeled base (or an arm on a cart) tips under braking by
+    a different mechanism -- the zero-moment point shifting by ``com_height * deceleration / g`` --
+    which this check does not model; for such a platform the static half is what applies
+    (``require_com_velocity: false`` with no velocity reported), and a braking-ZMP margin is an
+    open follow-up, not something the capture point stands in for.
+
+    Center-of-mass height is ``center_of_mass[2] - ground_height_m`` in the same frame as the
+    support polygon. The ANYmal-C adapter's base-position-for-center-of-mass (and base velocity
+    for center-of-mass velocity) stand-in applies here unchanged -- a documented simplification,
+    not a whole-body center of mass. Fewer than 3 contact points is still treated as maximally
+    unstable (see _distance_to_polygon_edge), so a biped in double support must report its foot
+    soles' contact corners, not two points -- the gap isaac_lab_g1.py documents remains open.
+    """
+    return _stability_margin(
+        "stability_margin_maintained", trajectory, min_margin_m=min_margin_m, use_capture_point=True,
+        require_com_velocity=require_com_velocity, ground_height_m=ground_height_m,
+        capture_step_allowance_m=capture_step_allowance_m, gravity_mps2=gravity_mps2,
+    )
+
+
 def balance_margin_maintained(
     state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
     min_margin_m: float = 0.03,
 ) -> PreconditionResult:
-    for point in trajectory.points:
-        robot = point.robot
-        if robot is None or robot.center_of_mass is None or robot.support_polygon is None:
-            return _fail(
-                "balance_margin_maintained",
-                "no balance state reported -- default-deny for legged/humanoid platforms",
-            )
-        margin = _distance_to_polygon_edge(robot.center_of_mass[:2], robot.support_polygon)
-        if _below(margin, min_margin_m):
-            return _fail(
-                "balance_margin_maintained",
-                f"center of mass within {margin:.3f}m of support-polygon edge at t={point.t:.2f}s",
-            )
-    return _ok("balance_margin_maintained", "center of mass stayed within the safe margin throughout")
+    """Legacy name, kept registered so existing action schemas and result-name consumers keep
+    working unchanged: the static half of stability_margin_maintained only, through the same
+    implementation, with the same result name and the same behavior as before -- it ignores
+    center-of-mass velocity even when one is reported. One deliberate tightening: an empty
+    trajectory now fails instead of passing vacuously (the engine already blocked that case before
+    any check ran). Wire stability_margin_maintained instead to get the capture-point margin."""
+    return _stability_margin(
+        "balance_margin_maintained", trajectory, min_margin_m=min_margin_m, use_capture_point=False,
+        require_com_velocity=False, ground_height_m=0.0, capture_step_allowance_m=0.0, gravity_mps2=GRAVITY_MPS2,
+    )
 
 
 def visibility_above_threshold(
@@ -729,6 +880,488 @@ def environment_hazard_clear(
     return _ok("environment_hazard_clear", "no environment hazard detected")
 
 
+# ---------------------------------------------------------------------------------------------
+# Next safety checks roadmap (2026-09): liveness, payload/grip force, stability (above), sensor
+# staleness and coverage, command and config integrity, vulnerable bystanders. Each closes a case
+# that every check above permits -- see tests/test_adversarial_next_checks.py for the scenario
+# each one was written against, demonstrated passing the pre-existing checks first.
+# ---------------------------------------------------------------------------------------------
+
+
+@_wants_check_context
+def decision_within_deadline(
+    state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
+    max_decision_latency_s: float = DEFAULT_MAX_DECISION_LATENCY_S,
+    context: Optional[CheckContext] = None,
+) -> PreconditionResult:
+    """Software liveness, half one of two: was this decision made within its deadline?
+
+    Every other check assumes the checker itself is running normally. It may not be: a dynamics
+    adapter that stalls for half a second, a GC pause, a perception call that blocks on a dead
+    socket and eventually returns. A decision like that still reaches PERMIT on every other check --
+    each one evaluates the world *as it was when the decision started*, which is no longer the world
+    the PERMIT will be acted in. This check measures the decision's own elapsed time, from the
+    moment ActuatorGate.gate() began (before perception) to the moment this check runs, on the
+    gate's own monotonic clock, and fails once it exceeds ``max_decision_latency_s``. List it LAST
+    in an action type's checks so it covers every check before it.
+
+    Half two is DecisionWatchdog (safety_harness/watchdog.py). This check can only catch a decision
+    that is late; it cannot catch one that never finishes, or a checker that has crashed -- a
+    check that never runs can't fail. The watchdog sits on the actuator side and freezes the robot
+    when no fresh PERMIT has arrived within its own deadline, whatever the reason. Neither half is a
+    substitute for a hardware watchdog timer: if the whole process hangs, only hardware can act.
+
+    Needs a CheckContext (supplied by the engine); called without one, it fails closed -- there is
+    no decision start time to measure from. A non-finite or negative elapsed time (a clock that ran
+    backwards, a corrupted start stamp) fails closed too.
+    """
+    name = "decision_within_deadline"
+    if context is None or not _is_real_number(context.decision_started_at):
+        return _fail(name, "no decision start time supplied -- not running under ActuatorGate; default-deny")
+    elapsed = context.clock() - context.decision_started_at
+    if _below(elapsed, 0.0):
+        return _fail(name, f"decision elapsed time {elapsed!r}s is negative or non-finite -- clock unconfirmed")
+    if _exceeds(elapsed, max_decision_latency_s):
+        return _fail(
+            name,
+            f"decision took {elapsed * 1000:.1f}ms, over its {max_decision_latency_s * 1000:.1f}ms deadline -- "
+            f"every check above evaluated a world that has since moved on",
+        )
+    return _ok(name, f"decision made in {elapsed * 1000:.1f}ms, within its {max_decision_latency_s * 1000:.1f}ms deadline")
+
+
+def payload_and_grip_force_within_limits(
+    state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
+    object_id_param: str = "object_id",
+    grip_force_param: str = "grip_force_n",
+    rated_payload_kg: Optional[float] = None,
+    max_grip_force_n: float = 70.0,
+    max_grip_force_fragile_n: float = 15.0,
+    friction_coefficient: float = 0.3,
+    contact_count: int = 2,
+    grip_safety_factor: float = 2.0,
+) -> PreconditionResult:
+    """The object-side counterpart of ISO/TS 15066's human-contact force limits: can the robot
+    carry this object at all, and is the commanded grip force neither too weak to hold it nor too
+    strong for it?
+
+    * Payload: the object's confirmed mass must not exceed the robot's rated payload. The rating
+      comes from the robot itself (``RobotProprioception.rated_payload_kg``, its datasheet figure)
+      and/or from ``rated_payload_kg`` here; when both are present the lower one governs, when
+      neither is, default-deny. Distinct from mass_within_force_budget, whose flat per-config
+      budget knows nothing about which robot is running it -- a config written for a 3kg-payload arm
+      and reused on a 0.5kg-payload one keeps permitting 3kg lifts until this check says otherwise.
+    * Too weak: ``action.params[grip_force_param]`` must reach the minimum friction grip that holds
+      the object against gravity, ``m * g * safety_factor / (mu * contact_count)`` -- below that the
+      object slips mid-carry, a drop hazard no other check reasons about.
+    * Too strong: it must not exceed ``max_grip_force_n`` (a representative parallel-gripper
+      continuous-force figure), or ``max_grip_force_fragile_n`` for an object tagged FRAGILE or
+      LIQUID_CONTAINING (a crushed glass is a sharp-edged, possibly liquid-releasing hazard), or the
+      object's own ``max_safe_grip_force_n`` if perception knows one. The lowest cap governs.
+
+    Missing object, mass, payload rating or commanded grip force; a NaN/negative/non-numeric value
+    anywhere; or an UNKNOWN hazard class (fragility unconfirmed): all default-deny. The friction and
+    force-cap defaults are representative values for illustrating the check's shape, not a
+    characterized figure for any real gripper or object -- same caveat as every ISO-derived default
+    in this module.
+    """
+    name = "payload_and_grip_force_within_limits"
+    obj_id = action.params.get(object_id_param)
+    obj = next((o for o in state.objects if o.object_id == obj_id), None)
+    if obj is None:
+        return _fail(name, f"object {obj_id!r} not in perceived world state")
+    mass = obj.estimated_mass_kg
+    if mass is None or not _is_real_number(mass) or _below(mass, 0.0):
+        return _fail(name, f"no confirmed, finite, non-negative mass for {obj_id!r} (got {mass!r})")
+
+    robot_rating = state.robot.rated_payload_kg if state.robot is not None else None
+    ratings = [r for r in (rated_payload_kg, robot_rating) if r is not None]
+    if not ratings:
+        return _fail(name, "no rated payload reported by the robot or configured -- default-deny")
+    for rating in ratings:
+        if not _is_real_number(rating) or _exceeds(mass, rating):
+            return _fail(name, f"{mass:.2f}kg exceeds (or cannot be confirmed within) the {rating!r}kg rated payload")
+
+    if HazardTag.UNKNOWN in obj.hazard_tags:
+        return _fail(name, f"hazard class of {obj_id!r} unknown -- no grip force can be confirmed safe for it")
+    grip = action.params.get(grip_force_param)
+    if grip is None or not _is_real_number(grip) or not math.isfinite(grip) or grip <= 0:
+        return _fail(name, f"no finite, positive commanded grip force in params[{grip_force_param!r}] (got {grip!r}) -- default-deny")
+
+    model = (friction_coefficient, contact_count, grip_safety_factor)
+    if not all(_is_real_number(v) and math.isfinite(v) and v > 0 for v in model):
+        return _fail(name, f"grip model parameters {model!r} must be finite and positive")
+    min_hold_n = mass * GRAVITY_MPS2 * grip_safety_factor / (friction_coefficient * contact_count)
+    if _below(grip, min_hold_n):
+        return _fail(
+            name,
+            f"grip {grip:.1f}N below the {min_hold_n:.1f}N needed to hold {mass:.2f}kg "
+            f"(mu={friction_coefficient}, safety factor {grip_safety_factor}) -- the object would slip",
+        )
+
+    caps = [(max_grip_force_n, "platform grip-force cap")]
+    if obj.hazard_tags & _CRUSH_RISK_TAGS:
+        caps.append((max_grip_force_fragile_n, "fragile/liquid-containing grip-force cap"))
+    if obj.max_safe_grip_force_n is not None:
+        caps.append((obj.max_safe_grip_force_n, f"{obj_id!r}'s own crush limit"))
+    for cap, label in caps:
+        if not _is_real_number(cap) or _exceeds(grip, cap):
+            return _fail(name, f"grip {grip:.1f}N exceeds (or cannot be confirmed within) the {cap!r}N {label}")
+    return _ok(name, f"{mass:.2f}kg within rated payload; grip {grip:.1f}N holds it without exceeding any cap")
+
+
+def sensor_data_fresh(
+    state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
+    max_sensor_age_s: float = DEFAULT_MAX_SENSOR_AGE_S,
+    max_future_skew_s: float = 0.0,
+    now: Optional[float] = None,
+) -> PreconditionResult:
+    """Is the sensor data this WorldState was built from recent enough to act on?
+
+    ``WorldState.timestamp`` can't answer this: it records when the state object was *assembled*,
+    so a state built right now from a camera frame captured two seconds ago looks perfectly fresh
+    to it, and to every check above -- a person who walked into the path in those two seconds is
+    simply absent. ``WorldState.sensor_timestamp`` is the capture time of the OLDEST sensor reading
+    the state was built from; this check compares it to the wall clock (``time.time()``, the same
+    epoch sensor drivers stamp with) and fails once it is older than ``max_sensor_age_s``.
+
+    Unreported (None), non-numeric or non-finite: default-deny -- an adapter has to report a
+    capture time to pass, there is no default that assumes one. A capture time in the future by more
+    than ``max_future_skew_s`` (default 0: none tolerated) also fails: it means the sensor's clock
+    and this host's disagree, and freshness can't be established across clocks that disagree. A
+    deployment with sensors on separately-synchronized hosts sets the tolerance from its measured
+    clock sync, rather than this check assuming one. ``now`` exists for deterministic tests.
+    """
+    name = "sensor_data_fresh"
+    ts = state.sensor_timestamp
+    if ts is None:
+        return _fail(name, "no sensor capture timestamp reported -- freshness unconfirmed, default-deny")
+    if not _is_real_number(ts) or not math.isfinite(ts):
+        return _fail(name, f"sensor capture timestamp {ts!r} is non-numeric or non-finite")
+    now = time.time() if now is None else now
+    age = now - ts
+    if _below(age, -max_future_skew_s):
+        return _fail(name, f"sensor timestamp is {-age:.3f}s in the future -- sensor and host clocks disagree")
+    if _exceeds(age, max_sensor_age_s):
+        return _fail(name, f"sensor data is {age:.3f}s old, over the {max_sensor_age_s:.3f}s limit")
+    return _ok(name, f"sensor data is {age:.3f}s old, within the {max_sensor_age_s:.3f}s limit")
+
+
+def _sphere_inside_region(center, radius: float, region: ObservedRegion) -> bool:
+    """Is the whole sphere inside the box -- every coordinate finite, box well-formed? Any doubt is
+    False (not observed), never True."""
+    try:
+        lo, hi = tuple(region.min_corner), tuple(region.max_corner)
+        center = tuple(center)
+    except TypeError:
+        return False
+    if len(lo) != 3 or len(hi) != 3 or len(center) != 3:
+        return False
+    if not (_is_real_number(radius) and math.isfinite(radius) and radius >= 0):
+        return False
+    for c, a, b in zip(center, lo, hi):
+        if not all(_is_real_number(v) and math.isfinite(v) for v in (c, a, b)):
+            return False
+        if not (a + radius <= c <= b - radius):
+            return False
+    return True
+
+
+def swept_path_observed(
+    state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
+    margin_m: float = 0.15,
+) -> PreconditionResult:
+    """Was the space the robot is about to sweep through actually *observed* this cycle?
+
+    Every human- and object-proximity check above reasons only about what perception reported.
+    "No agent within clearance" is evidence the path is clear only where a sensor could see; in
+    space occluded by a cabinet, or outside every camera's field of view, "no agent reported" is
+    the absence of evidence, not evidence of absence. visibility_above_threshold can't tell these
+    apart either: it is one scene-wide confidence number, happily 1.0 while the camera sees its
+    own half of the table perfectly and nothing at all of the half the arm is about to reach into.
+
+    This is coverage, deliberately distinct from confidence. Observed-but-uncertain (fog, glare, a
+    low-confidence track) is still visibility_above_threshold's and the tracking checks' job;
+    unobserved is this one's. Every predicted point's swept sphere, inflated by ``margin_m``, must
+    lie entirely inside at least one ``WorldState.observed_regions`` box. Straddling two overlapping
+    boxes counts as unobserved -- conservative, never optimistic. Coverage unreported (None), empty,
+    or made only of malformed/non-finite regions: default-deny.
+
+    ``margin_m`` defaults to the same 0.15m as the other swept-path checks. In a speed-and-
+    separation-monitored cell, set it to at least the protective separation distance: an unobserved
+    person just outside the observed box could otherwise reach the path before being seen.
+    """
+    name = "swept_path_observed"
+    regions = state.observed_regions
+    if regions is None:
+        return _fail(name, "no sensor coverage reported -- whether the swept path was observed at all is unknown; default-deny")
+    valid = tuple(r for r in regions if isinstance(r, ObservedRegion)) if isinstance(regions, (tuple, list)) else ()
+    if not valid:
+        return _fail(name, "no observed region reported -- nothing was observed, so no path through it is confirmed clear")
+    if not trajectory.points:
+        return _fail(name, "no predicted trajectory to evaluate")
+    for point in trajectory.points:
+        radius = point.swept_volume_radius_m + margin_m
+        if not any(_sphere_inside_region(point.swept_volume_center, radius, region) for region in valid):
+            return _fail(
+                name,
+                f"swept volume at t={point.t:.2f}s (center {point.swept_volume_center}, radius+margin {radius:.2f}m) "
+                f"extends outside every observed region -- unobserved, not merely uncertain",
+            )
+    return _ok(name, "every point of the swept path lies inside an observed region")
+
+
+@_wants_check_context
+def command_integrity_verified(
+    state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
+    require_seal: bool = False,
+    seal_param: str = COMMAND_SEAL_PARAM,
+    hmac_key_env: Optional[str] = None,
+    context: Optional[CheckContext] = None,
+) -> PreconditionResult:
+    """Is the action being checked bit-identical to the one that will be executed?
+
+    ``Action`` is frozen but its ``params`` dict isn't, so a checked action can be rewritten by
+    anyone holding a reference to it -- after the decision (closed by the engine binding a digest
+    into ``Decision.action_digest`` and the executor re-verifying it: integrity.
+    verify_decision_action / DecisionWatchdog.command()) or *during* it, between one check and the
+    next. The during-case is this check's job. The engine hashes the proposed action when gate()
+    begins; this check re-hashes it and fails on any difference: a rewrite part-way through means
+    the checks earlier in the list evaluated a different command than the one that would execute.
+    List it at the END of an action type's checks (only decision_within_deadline after it) so it
+    covers every check before it.
+
+    Fails closed on: no CheckContext or no start-of-decision digest; an action with no canonical
+    encoding (an opaque or lazily-evaluated param object whose value can't be pinned -- if it
+    can't be hashed it can't be proven unchanged); a digest mismatch.
+
+    Optional upstream layer: a proposer may seal its command (integrity.seal_action, HMAC-keyed if
+    ``hmac_key_env`` names an environment variable holding the key) so tampering *before* the gate
+    is caught too. A seal that is present is always verified, and a wrong one always fails.
+    ``require_seal`` makes an unsealed command fail as well -- set it wherever proposers seal, or
+    stripping the seal would be a way around it. A named key that isn't set fails closed rather
+    than silently verifying unkeyed.
+    """
+    name = "command_integrity_verified"
+    current = try_action_digest(action)
+    if current is None:
+        return _fail(
+            name,
+            "action has no canonical encoding (an opaque, lazily-evaluated or self-referencing param?) -- "
+            "it can't be bound to a digest, so it can't be proven unchanged at execution; default-deny",
+        )
+    if context is None or context.checked_action_digest is None:
+        return _fail(name, "no digest of the action as it was when the decision began -- default-deny")
+    if not digests_match(context.checked_action_digest, current):
+        return _fail(
+            name,
+            "action was modified while it was being checked -- earlier checks evaluated a different "
+            "command than the one that would be executed",
+        )
+    has_seal = seal_param in action.params
+    if require_seal or has_seal:
+        key = None
+        if hmac_key_env:
+            key = key_from_env(hmac_key_env)
+            if key is None:
+                return _fail(name, f"command-seal key variable {hmac_key_env!r} is unset -- cannot authenticate the seal")
+        if not has_seal:
+            return _fail(name, f"command carries no seal in params[{seal_param!r}] and this schema requires one")
+        if not verify_action_seal(action, key=key, seal_param=seal_param):
+            return _fail(name, "command seal does not match its content -- altered after it was issued, or sealed with another key")
+    return _ok(name, "action unchanged since the decision began" + (" and its seal verifies" if has_seal else ""))
+
+
+@_wants_check_context
+def config_integrity_verified(
+    state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
+    context: Optional[CheckContext] = None,
+) -> PreconditionResult:
+    """Does the configuration running this decision still match its known-good digest?
+
+    The action schema (which checks each action type runs) and every check's parameters are what
+    was validated. A silently edited YAML -- a force budget raised, a check deleted -- an
+    in-process rebinding of a REGISTRY entry, or a threshold default changed in code each change
+    validated behavior while every check still reports satisfied, because every check is only
+    checking what it was told to. ActionSchemaRegistry.config_digest() hashes the *effective*
+    running configuration (see its docstring for exactly what's covered); this check compares it,
+    on every single decision, to the digest pinned when the registry was constructed. So a tamper
+    after load fails here even though the load-time verification passed.
+
+    The pin can't live inside the config it protects -- whoever edits one edits both -- so it is
+    supplied to ActionSchemaRegistry(expected_digest=...) from outside (a release manifest, a
+    secrets store, ``configs/example_action_schema.yaml.sha256`` for the example). With an HMAC key
+    (hmac_key=...), held where the config's editor can't read it, the pin is a signature; without
+    one it detects corruption and uncoordinated edits but not an attacker who rewrites both.
+
+    No pinned digest at all: default-deny, because an unpinned config is an unvalidated one. No
+    CheckContext / no registry supplied: default-deny.
+    """
+    name = "config_integrity_verified"
+    registry = context.schema_registry if context is not None else None
+    if registry is None:
+        return _fail(name, "no running configuration supplied to verify -- default-deny")
+    if getattr(registry, "expected_digest", None) is None:
+        return _fail(name, "running configuration has no known-good digest pinned -- unvalidated config, default-deny")
+    if not registry.verify_config():
+        return _fail(name, "running configuration no longer matches its pinned known-good digest -- changed since it was validated")
+    return _ok(name, "running configuration matches its pinned known-good digest")
+
+
+# ISO/TS 15066:2016 Annex A, Table A.2: maximum permissible quasi-static contact force by body
+# region, in newtons. The standard allows transient contact up to twice the quasi-static value
+# (``transient_multiplier``) -- except for the head regions (skull/forehead, face), where contact is
+# to be avoided and this module applies no multiplier at all, conservatively. The height bands are
+# NOT from the standard, which defines regions anatomically: they are this module's own coarse
+# standing-posture approximation, as fractions of stature, of where each region can be. Hands are
+# assumed able to be anywhere from the floor to overhead reach. Every figure here needs a qualified
+# safety engineer to confirm against the current edition before any real deployment relies on it --
+# the same caveat as iso15066_power_force_limiting.
+_ISO15066_BODY_REGIONS = (
+    # (region, quasi-static max force N, (band low, band high) as a fraction of stature, transient contact allowed)
+    ("skull_and_forehead", 130.0, (0.89, 1.00), False),
+    ("face", 65.0, (0.86, 0.95), False),
+    ("neck", 150.0, (0.81, 0.88), True),
+    ("back_and_shoulders", 210.0, (0.70, 0.84), True),
+    ("chest", 140.0, (0.70, 0.82), True),
+    ("abdomen", 110.0, (0.56, 0.71), True),
+    ("pelvis", 180.0, (0.46, 0.58), True),
+    ("upper_arms_and_elbows", 150.0, (0.58, 0.84), True),
+    ("lower_arms_and_wrists", 160.0, (0.38, 0.66), True),
+    ("hands_and_fingers", 140.0, (0.00, 1.25), True),
+    ("thighs_and_knees", 220.0, (0.25, 0.52), True),
+    ("lower_legs", 130.0, (0.00, 0.30), True),
+)
+
+
+def _body_region_force_limit(swept_z, swept_r, floor_height_m, stature_m, transient_multiplier):
+    """(lowest permissible force, region name) among the body regions the swept sphere's height band
+    overlaps. Unknown/non-finite stature or height: every region counts (the face included) --
+    fail-closed. (inf, None) only when stature and height are confirmed and no region overlaps."""
+    known = all(_is_real_number(v) and math.isfinite(v) for v in (swept_z, swept_r, floor_height_m, stature_m)) and stature_m > 0
+    best_limit, best_region = math.inf, None
+    for region, force, (lo, hi), transient in _ISO15066_BODY_REGIONS:
+        if known:
+            band_lo = (swept_z - swept_r - floor_height_m) / stature_m
+            band_hi = (swept_z + swept_r - floor_height_m) / stature_m
+            if band_hi < lo or band_lo > hi:
+                continue
+        limit = force * (transient_multiplier if transient else 1.0)
+        if limit < best_limit:
+            best_limit, best_region = limit, region
+    return best_limit, best_region
+
+
+def vulnerable_bystander_protected(
+    state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
+    adult_min_clearance_m: float = 0.15,
+    vulnerable_min_clearance_m: float = 1.0,
+    crowd_size: int = 2,
+    crowd_radius_m: float = 2.0,
+    crowd_clearance_scale: float = 2.0,
+    crowd_force_scale: float = 0.75,
+    contact_plausible_range_m: float = 0.3,
+    effective_mass_kg: float = 5.0,
+    assumed_contact_time_s: float = 0.015,
+    transient_multiplier: float = 2.0,
+    floor_height_m: float = 0.0,
+) -> PreconditionResult:
+    """Different distance and force limits for who is actually there, instead of one "human" limit.
+
+    Every human-proximity check above treats every tracked agent identically -- the same margin,
+    the same flat 150N force limit -- whether it is one adult, a child, or three people at once.
+    ISO/TS 15066 itself doesn't: its biomechanical limits differ by body region (65N at the face,
+    220N at the thighs; see _ISO15066_BODY_REGIONS), and they were derived for adult workers only.
+
+    * Who: ``TrackedAgent.category``. ADULT gets the adult limits below. CHILD, ANIMAL and UNKNOWN
+      (the default -- unclassified is never assumed to be an adult) are *vulnerable*: no contact
+      is permitted at all, because no standard's force limits cover them, and a larger clearance,
+      ``vulnerable_min_clearance_m``, is required.
+    * Distance: every agent must stay at least swept radius + its own worst-case reach by that
+      point's time (same model as swept_path_clear_of_agents) + its category's clearance away from
+      the swept path. For one tracked adult with the defaults, this reproduces
+      swept_path_clear_of_agents' own 0.15m margin exactly -- the baseline is unchanged.
+    * Crowd: once ``crowd_size`` or more agents are within ``crowd_radius_m`` of the swept path,
+      every clearance is multiplied by ``crowd_clearance_scale`` and every force limit by
+      ``crowd_force_scale``. With several people, one can push or be pushed into the robot, one can
+      occlude another from the tracker, and a reactive behavior that slows for the nearest person
+      says nothing about the second.
+    * Force (adults only, within ``contact_plausible_range_m``): the same transient-impact estimate
+      as iso15066_power_force_limiting (``m_eff * closing_speed / contact_time``), but compared
+      against the lowest limit among the ISO/TS 15066 body regions the swept volume can reach *at
+      its height*, given the agent's ``stature_m``. A robot reaching up to a shelf at an adult's face
+      height gets the 65N face limit, not the flat 150N -- the case this check blocks and that one
+      permits. Unknown stature means every region, face included, is in reach.
+
+    The clearance and scaling defaults are representative values chosen for the structure of the
+    check, not figures from any standard -- ISO/TS 15066 has no child or crowd provisions to take
+    them from, which is exactly the gap. A qualified safety engineer sets them for a deployment, the
+    same caveat as every ISO-derived default in this module. A NaN distance or position fails
+    closed through ``_below``, and a NaN distance is never used to skip the force estimate, same as
+    iso15066_power_force_limiting.
+    """
+    name = "vulnerable_bystander_protected"
+    points = trajectory.points
+    if not points:
+        return _fail(name, "no predicted trajectory to evaluate")
+    if not state.agents:
+        return _ok(name, "no tracked agents")
+    # A NaN multiplier or scale would make every "limit < best" comparison below False and silently
+    # select no body region at all -- validate the force model up front instead.
+    force_model = (effective_mass_kg, assumed_contact_time_s, transient_multiplier, crowd_force_scale)
+    if not all(_is_real_number(v) and math.isfinite(v) and v > 0 for v in force_model):
+        return _fail(name, f"force model parameters {force_model!r} must be finite and positive")
+
+    near = sum(
+        1 for agent in state.agents
+        if any(_at_or_within(_distance(p.swept_volume_center, agent.pose.position), crowd_radius_m) for p in points)
+    )
+    # Written as "not fewer than" so a NaN crowd_size makes this a crowd (the stricter case).
+    crowd = not (near < crowd_size)
+    clearance_scale = crowd_clearance_scale if crowd else 1.0
+    force_scale = crowd_force_scale if crowd else 1.0
+    crowd_note = f"; crowd of {near} within {crowd_radius_m}m" if crowd else ""
+
+    prev = None
+    for point in points:
+        robot_speed = 0.0 if prev is None else _speed(prev, point)
+        for agent in state.agents:
+            vulnerable = agent.category != AgentCategory.ADULT
+            who = getattr(agent.category, "value", agent.category)
+            d = _distance(point.swept_volume_center, agent.pose.position)
+            clearance = (vulnerable_min_clearance_m if vulnerable else adult_min_clearance_m) * clearance_scale
+            required = point.swept_volume_radius_m + agent.worst_case_radius_m(point.t) + clearance
+            if _below(d, required):
+                return _fail(
+                    name,
+                    f"{who} agent {agent.agent_id!r} within {d:.2f}m at t={point.t:.2f}s "
+                    f"(needs {required:.2f}m for a {'vulnerable' if vulnerable else 'adult'} bystander{crowd_note})",
+                )
+            if math.isfinite(d) and d > contact_plausible_range_m:
+                continue  # confirmed too far for contact to be physically plausible at this point
+            if vulnerable:
+                return _fail(
+                    name,
+                    f"{who} agent {agent.agent_id!r} within contact range at t={point.t:.2f}s -- ISO/TS 15066's "
+                    f"force limits are for adults only; no contact is permitted with a {who} bystander",
+                )
+            force = effective_mass_kg * (robot_speed + agent.worst_case_speed_mps) / assumed_contact_time_s
+            limit, region = _body_region_force_limit(
+                point.swept_volume_center[2], point.swept_volume_radius_m, floor_height_m, agent.stature_m, transient_multiplier,
+            )
+            if region is None:
+                continue  # confirmed: no body region at the swept height (e.g. far above the head)
+            limit *= force_scale
+            if _exceeds(force, limit):
+                return _fail(
+                    name,
+                    f"estimated {force:.0f}N contact with adult {agent.agent_id!r}'s {region} at t={point.t:.2f}s "
+                    f"exceeds its {limit:.0f}N ISO/TS 15066 body-region limit{crowd_note}",
+                )
+        prev = point
+    return _ok(name, "every tracked agent kept its category's clearance and body-region force limit" + crowd_note)
+
+
 REGISTRY = {
     "object_hazard_confirmed": object_hazard_confirmed,
     "mass_within_force_budget": mass_within_force_budget,
@@ -754,4 +1387,15 @@ REGISTRY = {
     "iso15066_separation_distance_maintained": iso15066_separation_distance_maintained,
     "iso15066_power_force_limiting": iso15066_power_force_limiting,
     "reduced_speed_near_human": reduced_speed_near_human,
+    # Next safety checks roadmap. balance_margin_maintained above is now the legacy name for
+    # stability_margin_maintained's static-only half (same implementation, unchanged behavior):
+    # 32 registry names, 31 distinct checks.
+    "decision_within_deadline": decision_within_deadline,
+    "payload_and_grip_force_within_limits": payload_and_grip_force_within_limits,
+    "stability_margin_maintained": stability_margin_maintained,
+    "sensor_data_fresh": sensor_data_fresh,
+    "swept_path_observed": swept_path_observed,
+    "command_integrity_verified": command_integrity_verified,
+    "config_integrity_verified": config_integrity_verified,
+    "vulnerable_bystander_protected": vulnerable_bystander_protected,
 }
