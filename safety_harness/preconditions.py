@@ -396,6 +396,9 @@ def surface_confirmed_stable(
     state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
     surface_id_param: str = "target_surface_id", min_confidence: float = MIN_CONFIDENCE,
 ) -> PreconditionResult:
+    """DEPRECATED -- use destination_confirmed_stable_and_clear, which checks this AND that the
+    destination is stable and clear of risky objects. Kept registered so existing configs still load
+    (with a DeprecationWarning, see DEPRECATED_CHECKS); not counted as a distinct active check."""
     surf_id = action.params.get(surface_id_param)
     surf = next((o for o in state.objects if o.object_id == surf_id), None)
     if surf is None or _below(surf.pose_confidence, min_confidence):
@@ -434,11 +437,21 @@ def object_pose_confirmed(
 def robot_state_confirmed(
     state: WorldState, action: Action, trajectory: PredictedTrajectory,
 ) -> PreconditionResult:
-    """General gate, like visibility_above_threshold: is the robot's own proprioceptive state even
-    known? Found missing by fuzzing with robot=None: nothing currently wired reads state.robot
-    directly, so its absence went completely unnoticed until this test specifically tried it."""
-    if state.robot is None:
+    """General gate, like visibility_above_threshold: is the robot's own proprioceptive state known
+    AND readable? Found missing by fuzzing with robot=None. Since v0.3.1 it also checks the content:
+    an earlier version passed any non-None state, so NaN joint readings sailed through it (the live
+    re-validation found joint_position_limits_respected catching them instead)."""
+    robot = state.robot
+    if robot is None:
         return _fail("robot_state_confirmed", "no robot proprioceptive state reported")
+    if len(robot.joint_positions) == 0 or len(robot.joint_positions) != len(robot.joint_velocities):
+        return _fail("robot_state_confirmed", "joint positions/velocities missing or mismatched in length")
+    readings = list(robot.joint_positions) + list(robot.joint_velocities)
+    if robot.end_effector_pose is None:
+        return _fail("robot_state_confirmed", "no end-effector pose reported")
+    readings += list(robot.end_effector_pose.position)
+    if not all(_is_real_number(v) and math.isfinite(v) for v in readings):
+        return _fail("robot_state_confirmed", "non-finite or non-numeric proprioceptive reading")
     return _ok("robot_state_confirmed", "robot state confirmed")
 
 
@@ -1382,6 +1395,9 @@ def vulnerable_bystander_protected(
         prev = point
     return _ok(name, "every tracked agent kept its category's clearance and body-region force limit" + crowd_note)
 
+
+# Registered for backward compatibility only; ActionSchemaRegistry warns when a config uses one.
+DEPRECATED_CHECKS = {"surface_confirmed_stable": "destination_confirmed_stable_and_clear"}
 
 REGISTRY = {
     "object_hazard_confirmed": object_hazard_confirmed,

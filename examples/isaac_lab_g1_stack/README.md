@@ -132,8 +132,10 @@ What the nominal smoke runs found (8–16 envs, `ft2_rc_300`):
 3. **Grasp onsets are still blocked by `current_position_confirmed_stable`.** 13 grasp requests
    were permitted and 1,549 blocked; a blocked onset re-requests on every step, so the block count
    is inflated. Nominal place requests are also blocked by `destination_confirmed_stable_and_clear`
-   (55 blocks vs 12 permitted), probably because it counts the held blue block itself as clutter
-   at the destination. Both need diagnosis before the hazard campaign,
+   (55 blocks vs 12 permitted). *Correction:* this earlier guessed the check counted the held
+   blue block as clutter; it doesn't, since it has always excluded the placed object. The cause
+   is its other conditions (red block not confirmed stable, or low pose confidence). Which one
+   is still open; those runs recorded only check names, so the next run must log reasons. Both need diagnosis before the hazard campaign,
    because a harness that blocks nominal operation isn't a usable result.
 
 ## Next steps

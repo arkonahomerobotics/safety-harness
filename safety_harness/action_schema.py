@@ -16,13 +16,14 @@ from __future__ import annotations
 
 import copy
 import time
+import warnings
 from dataclasses import dataclass, replace
 from typing import Optional
 
 import yaml
 
 from .integrity import ConfigIntegrityError, config_digest, digests_match, try_action_digest
-from .preconditions import REGISTRY, CheckContext
+from .preconditions import DEPRECATED_CHECKS, REGISTRY, CheckContext
 from .schema import SCHEMA_VERSION, Action, PredictedTrajectory, PreconditionResult, WorldState
 
 
@@ -63,6 +64,12 @@ class ActionSchemaRegistry:
             for check in checks:
                 if check["name"] not in REGISTRY:
                     raise ValueError(f"unknown precondition check {check['name']!r} for action type {action_type!r}")
+                if check["name"] in DEPRECATED_CHECKS:
+                    warnings.warn(
+                        f"precondition check {check['name']!r} (action type {action_type!r}) is deprecated; "
+                        f"use {DEPRECATED_CHECKS[check['name']]!r}",
+                        DeprecationWarning, stacklevel=2,
+                    )
             schemas[action_type] = ActionTypeSchema(action_type=action_type, checks=checks)
         return cls(schemas, expected_digest=expected_digest, hmac_key=hmac_key)
 
