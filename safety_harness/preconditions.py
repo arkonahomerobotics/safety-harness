@@ -36,6 +36,12 @@ def _distance_to_polygon_edge(point_xy, polygon_xy) -> float:
     computational-geometry library for a real deployment without changing the call site."""
     if not polygon_xy:
         return 0.0
+    if not math.isfinite(point_xy[0]) or not math.isfinite(point_xy[1]):
+        # Python's builtin min() silently drops a NaN candidate depending on iteration order
+        # (nan < current is False, so a NaN that isn't first in the sequence never replaces a
+        # normal running minimum) -- see the design doc's NaN-Sensor Stress Test. Fail explicit and
+        # non-finite here rather than let that order-dependence decide the result.
+        return math.nan
     return min(_distance((*point_xy, 0.0), (*v, 0.0)) for v in polygon_xy)
 
 
@@ -47,6 +53,49 @@ def _fail(name: str, reason: str) -> PreconditionResult:
     return PreconditionResult(name=name, satisfied=False, reason=reason)
 
 
+# Every precondition below enforces default-deny through a `<`/`>`/`<=` comparison against a
+# sensor-derived float. IEEE-754 makes any such comparison involving NaN evaluate False in *both*
+# directions -- so a corrupted or never-actually-measured reading (a NaN mass, a NaN tracked
+# position, a NaN confidence score) silently satisfies the very check meant to catch its absence,
+# instead of failing it. Found by adversarial stress testing -- see the design doc's "NaN-Sensor
+# Stress Test" section and tests/test_adversarial_stress.py -- across mass_within_force_budget,
+# object_hazard_confirmed, object_pose_confirmed's confidence field, and a compound bypass of
+# swept_path_clear_of_agents + iso15066_separation_distance_maintained together.
+#
+# These three helpers are the shared fix: every bare numeric comparison in this file that gates a
+# PreconditionResult should go through one of them instead, so "unconfirmed" reliably means
+# "treated as the worst case," not "silently passes." Each name matches the comparison it replaces
+# (`_below` <-> `<`, `_exceeds` <-> `>`, `_at_or_within` <-> `<=`) and returns True -- the same
+# truth value that comparison would need to return to correctly trigger the caller's fail path --
+# whenever either operand is non-finite, regardless of which side of the comparison it's on.
+def _below(value: float, threshold: float) -> bool:
+    if not (math.isfinite(value) and math.isfinite(threshold)):
+        return True
+    return value < threshold
+
+
+def _exceeds(value: float, limit: float) -> bool:
+    if not (math.isfinite(value) and math.isfinite(limit)):
+        return True
+    return value > limit
+
+
+def _at_or_within(value: float, bound: float) -> bool:
+    if not (math.isfinite(value) and math.isfinite(bound)):
+        return True
+    return value <= bound
+
+
+def _safe_max(a: float, b: float) -> float:
+    """`max(a, b)`, but propagates non-finite instead of silently discarding it the way Python's
+    own `max` does: `max(0.0, float('nan'))` returns `0.0`, because every comparison `max` makes
+    internally against a NaN is False. Used where a worst-case running maximum must not let one
+    corrupted sample vanish just because of where it fell in iteration order."""
+    if not math.isfinite(a) or not math.isfinite(b):
+        return math.nan
+    return max(a, b)
+
+
 def object_hazard_confirmed(
     state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
     object_id_param: str = "object_id", min_confidence: float = MIN_CONFIDENCE,
@@ -55,7 +104,7 @@ def object_hazard_confirmed(
     obj = next((o for o in state.objects if o.object_id == obj_id), None)
     if obj is None:
         return _fail("object_hazard_confirmed", f"object {obj_id!r} not in perceived world state")
-    if obj.class_confidence < min_confidence:
+    if _below(obj.class_confidence, min_confidence):
         return _fail(
             "object_hazard_confirmed",
             f"class confidence {obj.class_confidence:.2f} below {min_confidence}",
@@ -73,7 +122,7 @@ def mass_within_force_budget(
     obj = next((o for o in state.objects if o.object_id == obj_id), None)
     if obj is None or obj.estimated_mass_kg is None:
         return _fail("mass_within_force_budget", f"no confirmed mass estimate for {obj_id!r}")
-    if obj.estimated_mass_kg > force_budget_kg:
+    if _exceeds(obj.estimated_mass_kg, force_budget_kg):
         return _fail(
             "mass_within_force_budget",
             f"{obj.estimated_mass_kg:.2f}kg exceeds budget {force_budget_kg}kg",
@@ -91,7 +140,7 @@ def swept_path_clear_of_agents(
             worst_case_r = agent.worst_case_radius_m(point.t)
             d = _distance(point.swept_volume_center, agent.pose.position)
             required_clearance = point.swept_volume_radius_m + worst_case_r + margin_m
-            if not confidence_ok or d < required_clearance:
+            if not confidence_ok or _below(d, required_clearance):
                 return _fail(
                     "swept_path_clear_of_agents",
                     f"agent {agent.agent_id!r} within {d:.2f}m at t={point.t:.2f}s "
@@ -112,7 +161,7 @@ def balance_margin_maintained(
                 "no balance state reported -- default-deny for legged/humanoid platforms",
             )
         margin = _distance_to_polygon_edge(robot.center_of_mass[:2], robot.support_polygon)
-        if margin < min_margin_m:
+        if _below(margin, min_margin_m):
             return _fail(
                 "balance_margin_maintained",
                 f"center of mass within {margin:.3f}m of support-polygon edge at t={point.t:.2f}s",
@@ -124,7 +173,7 @@ def visibility_above_threshold(
     state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
     min_visibility: float = 0.5,
 ) -> PreconditionResult:
-    if state.environment.visibility_confidence < min_visibility:
+    if _below(state.environment.visibility_confidence, min_visibility):
         return _fail(
             "visibility_above_threshold",
             f"visibility confidence {state.environment.visibility_confidence:.2f} below {min_visibility}",
@@ -138,7 +187,7 @@ def surface_confirmed_stable(
 ) -> PreconditionResult:
     surf_id = action.params.get(surface_id_param)
     surf = next((o for o in state.objects if o.object_id == surf_id), None)
-    if surf is None or surf.pose_confidence < min_confidence:
+    if surf is None or _below(surf.pose_confidence, min_confidence):
         return _fail("surface_confirmed_stable", f"surface {surf_id!r} not confirmed with sufficient confidence")
     return _ok("surface_confirmed_stable", f"surface {surf_id!r} confirmed")
 
@@ -155,10 +204,16 @@ def object_pose_confirmed(
     Also checks the position itself is finite, independent of the reported confidence: a high
     confidence score claimed for a NaN/Inf position is a contradiction, not a pass. Found by
     fuzzing with a NaN position -- confidence and the coordinate value are two different fields,
-    and nothing previously cross-checked that they agree."""
+    and nothing previously cross-checked that they agree.
+
+    The confidence score itself is put through the same `_below` non-finite-fails guard as every
+    other confidence gate in this module -- found missing by later adversarial stress testing: this
+    function's own explicit isfinite check above covered a NaN *position* under a high confidence
+    score, but a NaN *confidence score* itself still passed `pose_confidence < min_confidence`
+    (False either way) until now."""
     obj_id = action.params.get(object_id_param)
     obj = next((o for o in state.objects if o.object_id == obj_id), None)
-    if obj is None or obj.pose_confidence < min_confidence:
+    if obj is None or _below(obj.pose_confidence, min_confidence):
         return _fail("object_pose_confirmed", f"object {obj_id!r} pose confidence insufficient or object absent")
     if not all(math.isfinite(c) for c in obj.pose.position):
         return _fail("object_pose_confirmed", f"object {obj_id!r} reports a non-finite position despite a confidence score")
@@ -213,7 +268,7 @@ def swept_path_clear_of_risky_objects(
             continue
         for point in trajectory.points:
             d = _distance(point.swept_volume_center, obj.pose.position)
-            if d < point.swept_volume_radius_m + margin_m:
+            if _below(d, point.swept_volume_radius_m + margin_m):
                 return _fail(
                     "swept_path_clear_of_risky_objects",
                     f"bystander object {obj.object_id!r} within {d:.2f}m at t={point.t:.2f}s "
@@ -243,7 +298,7 @@ def destination_confirmed_stable_and_clear(
     close enough to be struck or damaged by the placement."""
     surf_id = action.params.get(surface_id_param)
     surf = next((o for o in state.objects if o.object_id == surf_id), None)
-    if surf is None or surf.pose_confidence < min_confidence:
+    if surf is None or _below(surf.pose_confidence, min_confidence):
         return _fail("destination_confirmed_stable_and_clear", f"destination {surf_id!r} not confirmed with sufficient confidence")
     if surf.supported_stably is not True:
         return _fail("destination_confirmed_stable_and_clear", f"destination {surf_id!r} itself not confirmed stable")
@@ -251,7 +306,7 @@ def destination_confirmed_stable_and_clear(
         if obj.object_id in (surf_id, action.params.get("object_id")):
             continue
         risky = not obj.cleared_for_interaction or obj.fall_consequence == FallConsequence.HAZARDOUS_RELEASE
-        if risky and _distance(surf.pose.position, obj.pose.position) < clearance_m:
+        if risky and _below(_distance(surf.pose.position, obj.pose.position), clearance_m):
             return _fail(
                 "destination_confirmed_stable_and_clear",
                 f"risky object {obj.object_id!r} within {clearance_m}m of destination {surf_id!r}",
@@ -273,9 +328,15 @@ def fall_consequence_acceptable(
     if obj.fall_consequence == FallConsequence.NONE:
         return _ok("fall_consequence_acceptable", f"object {obj_id!r} has no meaningful fall consequence")
     tolerance = obj.drop_tolerance_m if obj.drop_tolerance_m is not None else 0.0
-    max_height = max((p.swept_volume_center[2] for p in trajectory.points), default=obj.pose.position[2])
+    heights = [p.swept_volume_center[2] for p in trajectory.points] or [obj.pose.position[2]]
+    max_height = heights[0]
+    for h in heights[1:]:
+        # Not a bare max(): Python's builtin silently drops a NaN candidate that isn't first in
+        # the sequence (nan > current is False, so it never replaces the running maximum) -- the
+        # same order-dependence as _distance_to_polygon_edge's min(). _safe_max propagates it.
+        max_height = _safe_max(max_height, h)
     lift = max_height - obj.pose.position[2]
-    if obj.fall_consequence == FallConsequence.UNKNOWN or lift > tolerance:
+    if obj.fall_consequence == FallConsequence.UNKNOWN or _exceeds(lift, tolerance):
         return _fail(
             "fall_consequence_acceptable",
             f"lift of {lift:.2f}m exceeds confirmed drop tolerance ({tolerance:.2f}m; "
@@ -295,7 +356,7 @@ def joint_position_limits_respected(
         if robot is None or robot.joint_position_limits is None:
             return _fail("joint_position_limits_respected", "no joint position limits reported -- default-deny")
         for j, (pos, (lo, hi)) in enumerate(zip(robot.joint_positions, robot.joint_position_limits)):
-            if pos < lo + safety_margin or pos > hi - safety_margin:
+            if _below(pos, lo + safety_margin) or _exceeds(pos, hi - safety_margin):
                 return _fail(
                     "joint_position_limits_respected",
                     f"joint {j} at {pos:.3f} within {safety_margin}rad of its [{lo:.3f}, {hi:.3f}] limit at t={point.t:.2f}s",
@@ -315,7 +376,7 @@ def joint_velocity_within_limits(
         if robot is None or robot.joint_velocity_limits is None:
             return _fail("joint_velocity_within_limits", "no joint velocity limits reported -- default-deny")
         for j, (vel, limit) in enumerate(zip(robot.joint_velocities, robot.joint_velocity_limits)):
-            if abs(vel) > utilization_limit * limit:
+            if _exceeds(abs(vel), utilization_limit * limit):
                 return _fail(
                     "joint_velocity_within_limits",
                     f"joint {j} speed {abs(vel):.3f} exceeds {utilization_limit:.0%} of its {limit:.3f} limit at t={point.t:.2f}s",
@@ -334,7 +395,7 @@ def joint_effort_within_limits(
         if robot is None or robot.joint_effort_limits is None or robot.estimated_joint_efforts is None:
             return _fail("joint_effort_within_limits", "no joint effort limits/estimate reported -- default-deny")
         for j, (effort, limit) in enumerate(zip(robot.estimated_joint_efforts, robot.joint_effort_limits)):
-            if abs(effort) > utilization_limit * limit:
+            if _exceeds(abs(effort), utilization_limit * limit):
                 return _fail(
                     "joint_effort_within_limits",
                     f"joint {j} effort {abs(effort):.3f} exceeds {utilization_limit:.0%} of its {limit:.3f} limit at t={point.t:.2f}s",
@@ -353,7 +414,7 @@ def motor_temperature_within_limits(
     if robot is None or robot.motor_temperature_c is None or robot.motor_temperature_limit_c is None:
         return _fail("motor_temperature_within_limits", "no motor temperature reported -- default-deny")
     for j, (temp, limit) in enumerate(zip(robot.motor_temperature_c, robot.motor_temperature_limit_c)):
-        if temp > limit - safety_margin_c:
+        if _exceeds(temp, limit - safety_margin_c):
             return _fail(
                 "motor_temperature_within_limits",
                 f"joint {j} motor at {temp:.1f}°C, within {safety_margin_c}°C of its {limit:.1f}°C limit",
@@ -380,7 +441,7 @@ def cartesian_speed_within_limits(
         if dt <= 0:
             continue
         speed = _distance(prev.swept_volume_center, cur.swept_volume_center) / dt
-        if speed > limit:
+        if _exceeds(speed, limit):
             return _fail(
                 "cartesian_speed_within_limits",
                 f"segment ending t={cur.t:.2f}s at {speed:.2f}m/s exceeds the {limit:.2f}m/s limit",
@@ -398,7 +459,7 @@ def self_collision_clear(
     for point in trajectory.points:
         if point.self_collision_margin_m is None:
             return _fail("self_collision_clear", "no self-collision margin reported -- default-deny")
-        if point.self_collision_margin_m < min_margin_m:
+        if _below(point.self_collision_margin_m, min_margin_m):
             return _fail(
                 "self_collision_clear",
                 f"self-collision margin {point.self_collision_margin_m:.3f}m below {min_margin_m}m at t={point.t:.2f}s",
@@ -419,7 +480,7 @@ def battery_charge_sufficient(
     robot = state.robot
     if robot is None or robot.battery_charge_fraction is None:
         return _fail("battery_charge_sufficient", "no battery state reported -- default-deny")
-    if robot.battery_charge_fraction < min_charge_fraction:
+    if _below(robot.battery_charge_fraction, min_charge_fraction):
         return _fail(
             "battery_charge_sufficient",
             f"charge {robot.battery_charge_fraction:.0%} below the {min_charge_fraction:.0%} reserve needed to safely fall back",
@@ -482,7 +543,7 @@ def iso15066_separation_distance_maintained(
                 + human_position_uncertainty + robot_position_uncertainty_m  # C, Zr
             )
             d = _distance(point.swept_volume_center, agent.pose.position)
-            if d < required:
+            if _below(d, required):
                 return _fail(
                     "iso15066_separation_distance_maintained",
                     f"separation {d:.2f}m below ISO/TS 15066 S(t0)={required:.2f}m at t={point.t:.2f}s "
@@ -525,6 +586,17 @@ def iso15066_power_force_limiting(
     without this gate every tracked agent anywhere in the scene would trigger a "would this hurt
     them" calculation regardless of distance. Found by the first pass of local tests: a far_agent()
     fixture 7m away still failed this check before the gate was added.
+
+    That "too far, skip" gate is deliberately *not* run through `_exceeds` the way every other
+    comparison in this module is: `_exceeds` treats a non-finite distance as automatically
+    exceeding the range, which here would mean automatically *skipping* an agent whose position is
+    unconfirmed -- exactly backwards for a gate whose only job is to decide whether to bother
+    checking at all. An unconfirmed distance must never license skipping; it must fall through to
+    be evaluated, same as `math.isfinite` gates the skip explicitly below. Found by adversarial
+    stress testing: with the naive `> contact_plausible_range_m` comparison, a NaN coordinate made
+    the gate stop skipping (since `nan > range` is also False) as a side effect rather than by
+    design, which happened to fail closed only for this check's specific default numbers -- see the
+    design doc's "NaN-Sensor Stress Test".
     """
     points = trajectory.points
     if not points:
@@ -536,13 +608,14 @@ def iso15066_power_force_limiting(
     for point in points:
         robot_speed = 0.0 if prev is None else _speed(prev, point)
         for agent in state.agents:
-            if _distance(point.swept_volume_center, agent.pose.position) > contact_plausible_range_m:
-                continue  # too far for contact to be physically plausible at this point
+            d = _distance(point.swept_volume_center, agent.pose.position)
+            if math.isfinite(d) and d > contact_plausible_range_m:
+                continue  # confirmed too far for contact to be physically plausible at this point
             relative_speed = robot_speed + agent.worst_case_speed_mps  # worst case: closing head-on
             force = effective_mass_kg * relative_speed / assumed_contact_time_s
-            worst_force = max(worst_force, force)
+            worst_force = _safe_max(worst_force, force)
         prev = point
-    if worst_force > max_transient_force_n:
+    if _exceeds(worst_force, max_transient_force_n):
         return _fail(
             "iso15066_power_force_limiting",
             f"estimated transient contact force {worst_force:.0f}N exceeds the {max_transient_force_n:.0f}N limit",
@@ -575,7 +648,7 @@ def reduced_speed_near_human(
         robot_speed = 0.0 if prev is None else _speed(prev, point)
         for agent in human_agents:
             d = _distance(point.swept_volume_center, agent.pose.position)
-            if d <= collaborative_zone_radius_m and robot_speed > max_speed_in_zone_mps:
+            if _at_or_within(d, collaborative_zone_radius_m) and _exceeds(robot_speed, max_speed_in_zone_mps):
                 return _fail(
                     "reduced_speed_near_human",
                     f"agent {agent.agent_id!r} within {d:.2f}m (zone={collaborative_zone_radius_m}m) while "
