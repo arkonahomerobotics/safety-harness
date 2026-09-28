@@ -16,6 +16,13 @@ adjustable parameter, not a hidden constant -- same "disclosed, not standards-ce
 the ISO/TS 15066 placeholder figures elsewhere in this project. ISO 3691-4 itself does not publish a
 single universal clearance or sightline number; a real deployment sets these from its own risk
 assessment (rated speed, stopping distance, aisle traffic), which this tool does not do for you.
+
+DESIGN BOUNDARY (see the example README's own section on this): this module reads a map ONCE and
+returns findings for a human to review before deployment. It must never be wired into a live control
+or path-planning loop that re-evaluates continuously and acts on its own findings -- that crosses
+from a pre-deployment analysis tool into the same "safety component" classification territory
+safety_harness itself sits in (EU Machinery Regulation Art. 3(3)), which is a real, deliberate design
+line, not an implementation detail to casually cross for convenience.
 """
 
 from __future__ import annotations
