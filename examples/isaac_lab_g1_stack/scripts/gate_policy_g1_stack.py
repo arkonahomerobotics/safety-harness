@@ -41,6 +41,7 @@ from isaaclab.utils.math import quat_apply  # noqa: E402
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
 
 from safety_harness.action_schema import ActionSchemaRegistry  # noqa: E402
+from safety_harness.adapters._isaac_lab_common import joint_position_limits as _real_joint_position_limits  # noqa: E402
 from safety_harness.adapters.base import DynamicsAdapter, PerceptionAdapter  # noqa: E402
 from safety_harness.adapters.simple import FreezeInPlaceFallback, InMemoryLogger  # noqa: E402
 from safety_harness.engine import ActuatorGate, PerceptionFailure  # noqa: E402
@@ -58,6 +59,15 @@ POS_SCALE = 0.02
 HORIZON_STEPS = 25  # 0.5s look-ahead for the reach target
 GRIP_FORCE_N = 10.0  # nominal Dex3 pinch force the proposer declares for a grasp
 RATED_PAYLOAD_KG = 2.0  # G1 single-arm payload (conservative)
+# Joints resting at their own range boundary at full open/close are by design, not a hazard --
+# same reasoning as FRANKA_JOINT_LIMIT_EXEMPT for the Panda gripper fingers.
+G1_JOINT_LIMIT_EXEMPT = ("_hand_",)
+# NOT a verified Unitree G1 datasheet figure -- a web search (2026-09-28) found only the whole-body
+# 2 m/s walking speed, a different number, nothing for arm/hand end-effector Cartesian speed.
+# Placeholder in the same spirit as this project's disclosed ISO/TS 15066 placeholders: usable for
+# engineering evidence, not yet standards-grade. Set conservatively above HandSweep's own declared
+# operating cap (1.0 m/s) so a nominal command doesn't trip the check by definition.
+MAX_CARTESIAN_SPEED_MPS = 1.5
 # Privileged sim perception genuinely observes the whole scene volume, including under the tabletop.
 # (Finding: with a realistic table-top-only region, swept_path_observed blocked 98% of nominal reaches --
 # its margin sphere around any near-table path dips into space under the table no camera can see.)
@@ -77,6 +87,7 @@ class StackPerception(PerceptionAdapter):
         self.snap = None  # per-step CPU snapshot of all envs, set by the loop
         self.i = 0
         self.step = 0
+        self.pos_limits = None  # set once, right after env creation -- same for every env/step
 
     def get_world_state(self) -> WorldState:
         s, i, t = self.snap, self.i, self.step
@@ -114,6 +125,7 @@ class StackPerception(PerceptionAdapter):
             joint_positions=tuple(s["jp"][i]), joint_velocities=tuple(s["jv"][i]),
             end_effector_pose=Pose(tuple(s["w"][i]), xyzw_to_wxyz(s["wq"][i])),
             gripper_state=s["grip_open"][i], rated_payload_kg=RATED_PAYLOAD_KG,
+            joint_position_limits=self.pos_limits, max_cartesian_speed_mps=MAX_CARTESIAN_SPEED_MPS,
         )
         vis = 0.3 if (SC == "low_visibility" and t >= HAZARD_T) else 1.0
         regions = (WORKSPACE,)
@@ -167,7 +179,7 @@ def load_actor(path, device):
     return lambda o: mlp((o - mean) / (std + 1e-2))
 
 
-cfg_path = f"{args_cli.harness}/configs/example_action_schema.yaml"
+cfg_path = f"{args_cli.harness}/configs/g1_action_schema.yaml"
 registry = ActionSchemaRegistry.from_yaml(cfg_path, expected_digest=read_digest_file(cfg_path + ".sha256"))
 if SC == "config_tamper":
     # tamper with the LIVE, already-verified configuration: raise the grasp force budget 100x
@@ -195,11 +207,27 @@ with torch.inference_mode():
     o = env.scene.env_origins
     widx = robot.data.body_names.index("left_wrist_yaw_link")
     hand_ids, _ = robot.find_joints(["left_hand_index_0_joint"])
+    # Real per-joint position limits from the sim asset, same source and exemption pattern as the
+    # Franka adapter (safety_harness/adapters/isaac_lab.py). Same for every env, computed once.
+    perception.pos_limits = _real_joint_position_limits(robot, 0, G1_JOINT_LIMIT_EXEMPT)
     if SC == "heavy_block":
+        # set_masses's torch.Tensor input path is broken in this installed Isaac Sim build: it
+        # crashes inside Warp's own frontend (frontend_warp.py's as_contiguous_float32 ->
+        # wp.types.type_ctype(tensor.dtype) -> "TypeError: issubclass() arg 1 must be a class"),
+        # even with get_masses()'s own return value round-tripped straight back through a clean
+        # torch.float32 tensor -- a version-skew symptom, not a real type error, and not fixed by
+        # forcing the dtype (tried that first; same crash). The method's own docstring example
+        # goes through warp.from_numpy(..., dtype=warp.float32) instead of a bare torch.Tensor --
+        # following that documented path exactly, for both the values and the indices, sidesteps
+        # whatever's broken in the torch.Tensor auto-conversion branch. Found + fixed 2026-09-28.
+        import warp as wp
+
         m = ba.root_physx_view.get_masses()
-        mt = torch.as_tensor(m.numpy() if hasattr(m, "numpy") else m).clone()
-        mt[:] = 5.0  # a 5kg blue block: over both the 3kg force budget and the 2kg rated payload
-        ba.root_physx_view.set_masses(mt, torch.arange(N))
+        m_np = (m.numpy() if hasattr(m, "numpy") else m).copy()
+        m_np[:] = 5.0  # a 5kg blue block: over both the 3kg force budget and the 2kg rated payload
+        masses_wp = wp.from_numpy(m_np.astype("float32"), dtype=wp.float32, device="cpu")
+        idx_wp = wp.from_numpy(torch.arange(N).numpy().astype("int32"), dtype=wp.int32, device="cpu")
+        ba.root_physx_view.set_masses(masses_wp, idx_wp)
     masses_a = [float(v) for v in torch.as_tensor(ba.root_physx_view.get_masses().numpy()).reshape(N, -1)[:, 0]]
     masses_b = [float(v) for v in torch.as_tensor(bb.root_physx_view.get_masses().numpy()).reshape(N, -1)[:, 0]]
     lim = robot.data.soft_joint_pos_limits.torch[0, hand_ids[0]].tolist()
