@@ -82,7 +82,9 @@ are robot-agnostic. Reference adapters exist for three Isaac Lab robots (Franka 
 `adapters/isaac_lab.py`; ANYmal-C, `adapters/isaac_lab_anymal.py`; Unitree G1,
 `adapters/isaac_lab_g1.py`) and, since 0.3.8, a real ROS 2 graph instead of a simulator
 (`adapters/ros2.py` — see [`examples/ros2_hooks`](examples/ros2_hooks/) for a runnable, self-checking
-demonstration against real `rclpy` nodes, verified in a `ros:humble-ros-base` container).
+demonstration against real `rclpy` nodes, verified in a `ros:humble-ros-base` container, and
+[`examples/turtlebot3_gazebo_hooks`](examples/turtlebot3_gazebo_hooks/) for the same adapter gating
+a real TurtleBot3 physically simulated in a real headless Gazebo, not a mock publisher).
 
 **Not yet independently verified** (deliberately flagged, not buried): the ISO/TS 15066 Table A.2
 body-region force figures, the child clearance and the crowd factors in
