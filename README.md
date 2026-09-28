@@ -30,7 +30,9 @@ Unitree G1 humanoid with a dexterous hand) ships with a trained block-stacking p
 hazards is in progress, not yet a validation result. A fourth adapter targets a real ROS 2 graph
 instead of a simulator — see [`examples/ros2_hooks`](examples/ros2_hooks/); it demonstrates the
 software genuinely integrates into a real ROS 2 control loop, not a physical-hardware validation
-result either. It has **not**
+result either. A separate, standalone proof-of-concept — [`examples/nav2_hazard_scan`](examples/nav2_hazard_scan/)
+— applies the same named-check pattern to a real Nav2 map at deployment time instead of live
+actions; it is not wired through `ActuatorGate` and not a certified risk assessment. It has **not**
 been reviewed by a functional-safety assessor
 against IEC 61508, ISO 13849, or ISO 10218/TS 15066 — see the design doc's Scope & Non-Goals
 section for what's out of scope today (joint-space kinematic checks, certified numeric
