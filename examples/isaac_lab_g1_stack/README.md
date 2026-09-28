@@ -109,6 +109,31 @@ test above replaced it.
 
 A BLOCK freezes the arm and holds the grip. Execution goes through `verify_decision_action()`.
 
+**`--video <path.mp4>` renders an annotated demo clip** of env 0 (use `--num_envs 1`; `--max_steps`
+caps the episode for a smoke test before committing to a full render). Depends on
+`overlay.annotate`/`write_mp4` from `/workspace/isaaclab/overlay.py` -- like the Franka and
+ANYmal-C demo scripts, that helper is a box-only file, not checked into this repo; `--video` will
+fail on import outside an environment that already has it.
+
+**A real camera-framing bug, found and fixed 2026-09-28 (Kaoru caught it: "I can't even see the
+block").** The first rendered clip's camera (`eye=(0.35,-0.75,1.35)`) sat on the *opposite* side of
+the robot from the blocks -- robot root at `(0,0,0.75)`, blocks at roughly `(-0.2, 0.35, 0.72)` --
+so the sight line to the lookat point ran straight through the robot's own torso: the clip showed
+its back the whole time, the actual workspace never visible. Root-caused by querying the real
+block/robot positions live (`root_pos_w`), not by re-guessing angles. Took two frame-verified
+iterations to actually fix:
+1. Move the camera to the same side as the blocks -- fixed the opening frame, but the arm's own
+   reach motion swings across the sightline and hides the target block behind the arm for most of
+   the clip. Missed on the first pass because only frame 0 was checked.
+2. Pull back further and raise to a steeper, more overhead angle, so the tabletop stays visible
+   past the arm's swing instead of being seen edge-on. Confirmed this time by sampling frames
+   spread across the *entire* render, not just the opening shot.
+
+The working values are the `env_cfg.viewer.eye`/`lookat` currently in the script. **Lesson for any
+future camera work here or on another robot:** verify a new camera setup across the whole clip, not
+just the first frame or two -- a shot that looks fine with the arm at rest can still get
+self-occluded once the arm actually moves into its work envelope.
+
 **A real, silent regression, found and fixed 2026-09-28.** `joint_position_limits_respected` and
 `cartesian_speed_within_limits` were wired into the example schema's `grasp`/`place`/`reach` in
 0.3.1 -- but this script never reported `RobotProprioception.joint_position_limits` or
