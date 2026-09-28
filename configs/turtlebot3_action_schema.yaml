@@ -1,0 +1,57 @@
+# TurtleBot3 (Gazebo) action schema: navigate, for safety_harness/adapters/ros2.py against a real
+# differential-drive mobile base instead of a manipulator -- see examples/turtlebot3_gazebo_hooks/
+# for the real rclpy bridge node and a runnable demonstration against a real headless Gazebo
+# simulation.
+#
+# Mirrors configs/example_action_schema.yaml's `navigate` (for the Isaac Lab ANYmal-C quadruped)
+# with three differences, all because there's no real data behind them for this wheeled base:
+#   - stability_margin_maintained is NOT wired: that check is about a legged robot's support
+#     polygon and center-of-mass margin; a wheeled base's stability isn't meaningfully modeled the
+#     same way, and this bridge reports no support_polygon/center_of_mass data.
+#   - swept_path_clear_of_risky_objects is NOT wired: this minimal bridge doesn't track any
+#     hazardous static objects in the demo world, so wiring a check with nothing behind it would
+#     just always default-deny for the wrong reason (no risky object was ever confirmed clear,
+#     not because one was actually found).
+#   - robot_state_confirmed is NOT wired: found live, not assumed -- that check fails closed
+#     whenever `joint_positions` is empty (see preconditions.py), and a differential-drive base
+#     genuinely has no manipulator joints to report. Reporting a fabricated placeholder joint just
+#     to satisfy the check would be dishonest data, not a real signal; omitting the check is the
+#     same choice this project already makes elsewhere for a check with nothing real behind it.
+#
+# Regenerate the digest after any reviewed change:
+#   python -m safety_harness.pin configs/turtlebot3_action_schema.yaml > configs/turtlebot3_action_schema.yaml.sha256
+
+action_types:
+  navigate:
+    checks:
+      - name: sensor_data_fresh
+        kwargs:
+          max_sensor_age_s: 0.5
+      - name: swept_path_clear_of_agents
+        kwargs:
+          margin_m: 0.3
+      - name: iso15066_separation_distance_maintained
+        kwargs: {}
+      - name: iso15066_power_force_limiting
+        kwargs: {}
+      - name: vulnerable_bystander_protected
+        kwargs: {}
+      - name: reduced_speed_near_human
+        kwargs: {}
+      - name: swept_path_observed
+        kwargs:
+          margin_m: 0.3
+      - name: visibility_above_threshold
+        kwargs:
+          min_visibility: 0.5
+      - name: environment_hazard_clear
+        kwargs: {}
+      - name: cartesian_speed_within_limits
+        kwargs: {}
+      - name: config_integrity_verified
+        kwargs: {}
+      - name: command_integrity_verified
+        kwargs: {}
+      - name: decision_within_deadline
+        kwargs:
+          max_decision_latency_s: 0.2
