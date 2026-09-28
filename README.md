@@ -53,6 +53,11 @@ evidence, not a certification.
   configs/example_action_schema.yaml.sha256` regenerates the pin; the command prints the digest).
 - `safety_harness/action_schema.py` — the YAML-driven registry mapping action types to the checks
   they must pass (`configs/example_action_schema.yaml` is the reference wiring).
+- `safety_harness/sbom.py` — CycloneDX Software Bill of Materials generation (`python -m
+  safety_harness.sbom > examples/sbom/results/safety-harness.cyclonedx.json` regenerates it; see
+  [`examples/sbom/`](examples/sbom/) for the checked-in reference output and why CycloneDX, not
+  SPDX). Reports exactly one runtime third-party dependency (`pyyaml`) — see that module's
+  docstring for why that's the honest answer, not "stdlib only, zero dependencies."
 - `tests/` — unit tests, mutation/random-fuzz tests, and reflection-driven black-box contract
   tests.
 
@@ -123,6 +128,12 @@ robot.execute(watchdog.command())  # the permitted action only while fresh and b
 Nothing here is Isaac-Lab-specific except the two adapter classes — swap those for adapters
 targeting your own robot stack and the engine, checks, and tests are unchanged. See "Contributing
 an adapter" below.
+
+## Security
+
+Reporting a vulnerability (including a default-deny bypass — see the design doc's "NaN-Sensor
+Stress Test" for a real example of the kind of finding this covers), supported versions, and the
+coordinated-disclosure policy: [SECURITY.md](SECURITY.md).
 
 ## License
 
