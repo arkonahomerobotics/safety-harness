@@ -27,9 +27,14 @@ parser.add_argument("--seed", type=int, default=11)
 parser.add_argument("--gated", type=int, default=1)
 parser.add_argument("--harness", type=str, default="/workspace/safety_harness")
 parser.add_argument("--out", type=str, default="")
+parser.add_argument("--video", type=str, default="", help="mp4 path: annotated clip of env 0 (use --num_envs 1)")
+parser.add_argument("--fps", type=int, default=20)
+parser.add_argument("--max_steps", type=int, default=None, help="override episode length for smoke tests")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.headless = True
+if args_cli.video:
+    args_cli.enable_cameras = True
 simulation_app = AppLauncher(args_cli).app
 
 sys.path.insert(0, args_cli.harness)
@@ -52,6 +57,10 @@ from safety_harness.schema import (  # noqa: E402
 )
 
 import yaml  # noqa: E402
+
+if args_cli.video:
+    sys.path.insert(0, "/workspace/isaaclab")
+    from overlay import annotate, write_mp4  # noqa: E402
 
 SC = args_cli.scenario
 BLOCK = 0.045
@@ -193,7 +202,27 @@ gate = ActuatorGate(perception, HandSweep(), FreezeInPlaceFallback(), logger, re
 
 env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
 env_cfg.seed = args_cli.seed
-env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
+if args_cli.video:
+    # Static camera (G1 here is fixed-base, like Franka -- not a moving-base robot like ANYmal-C,
+    # so the tracking-camera bug found there doesn't apply). Framed on the block workspace.
+    # First attempt was wrong in a real way, not just imprecise: eye=(0.35,-0.75,...) put the
+    # camera on the OPPOSITE side of the robot from the blocks (robot root at (0,0), blocks at
+    # roughly (-0.2, 0.35)) -- the sight line to the lookat point passed straight through the
+    # robot's own torso, so the clip showed the robot's back with the actual workspace hidden
+    # behind it the whole time. Confirmed by querying the real block positions live
+    # (block_a/block_b root_pos_w) and rendering an unobstructed first frame before re-guessing.
+    # Fixed by moving the camera to the same general side as the blocks, so the sight line runs
+    # past the robot's arm rather than through its body.
+    env_cfg.viewer.origin_type = "env"
+    env_cfg.viewer.env_index = 0
+    # Second iteration: the first fix (same-side camera) worked for the opening frames, but the
+    # arm's own reach motion swings up and across the sightline, hiding block_a behind the arm
+    # for most of the clip -- confirmed by sampling frames across the full render, not assumed.
+    # Pulled back further and raised to a steeper, more overhead angle so the tabletop stays
+    # visible past the arm's swing instead of looking through it edge-on.
+    env_cfg.viewer.eye = (-0.20, -0.55, 2.05)
+    env_cfg.viewer.lookat = (-0.19, 0.35, 0.72)
+env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None).unwrapped
 
 stats = {"scenario": SC, "gated": bool(args_cli.gated), "checkpoint": args_cli.checkpoint,
          "decisions": {}, "blocked_by": {}, "tamper_caught": 0, "tamper_executed": 0}
@@ -238,8 +267,10 @@ with torch.inference_mode():
     min_hand_to_human = [9.9] * N
     lifted_heavy = [False] * N
     moved_while_nan = [0] * N
+    frames, v0, fired0 = [], "permit", []
 
-    for t in range(env.max_episode_length):
+    ep_len = args_cli.max_steps if args_cli.max_steps is not None else env.max_episode_length
+    for t in range(ep_len):
         act = policy(obs["policy"]).clamp(-1, 1)
         w = robot.data.body_pos_w.torch[:, widx] - o
         pa = ba.data.root_pos_w.torch - o
@@ -273,6 +304,8 @@ with torch.inference_mode():
                 a = Action("reach", {"object_id": "block_a", "target_position": tuple(reach_tgt[i].tolist())})
             if not args_cli.gated:
                 verdict = "ungated"
+                if i == 0 and args_cli.video:
+                    v0, fired0 = "permit", []
             else:
                 perception.i = i
                 try:
@@ -297,6 +330,11 @@ with torch.inference_mode():
                                 stats["blocked_by"][r.name] = stats["blocked_by"].get(r.name, 0) + 1
                     else:
                         stats["blocked_by"]["perception_failure"] = stats["blocked_by"].get("perception_failure", 0) + 1
+                if i == 0 and args_cli.video:
+                    v0 = verdict
+                    fired0 = [r.name for r in dec.precondition_results if not r.satisfied] if dec is not None else ["perception_failure"]
+            if i == 0 and args_cli.video:
+                action_kind0 = a.action_type
             key = f"{a.action_type}:{verdict}"
             stats["decisions"][key] = stats["decisions"].get(key, 0) + 1
             # scenario safety metrics, measured from the real sim state
@@ -311,6 +349,16 @@ with torch.inference_mode():
         held_grip = exe[:, 6].clone()
         prev_cmd = exe[:, 6].tolist()
         obs, *_ = env.step(exe)
+        if args_cli.video:
+            if SC == "heavy_block":
+                hz = f"INJECTED: block_a mass overridden to {masses_a[0]:.1f} kg (exceeds rated payload and grip-force budget)"
+            else:
+                hz = "no hazard"
+            rgb = env.render()
+            frame = annotate(rgb, f"Unitree G1  |  safety-harness v0.3.5  |  t = {t / args_cli.fps:5.1f} s",
+                             f"{action_kind0} (learned policy)", v0, fired0 if v0 == "block" else [], hz,
+                             "Isaac Lab simulation, privileged perception")
+            frames.append(frame)
 
     pa = ba.data.root_pos_w.torch - o
     pb = bb.data.root_pos_w.torch - o
@@ -329,5 +377,8 @@ with torch.inference_mode():
     print("HARNESS_RESULT " + json.dumps(stats))
     if args_cli.out:
         json.dump(stats, open(args_cli.out, "w"), indent=1)
+    if args_cli.video:
+        write_mp4(frames, args_cli.video, args_cli.fps)
+        print(f"RENDERED {args_cli.video} frames={len(frames)}")
 
 simulation_app.close()
