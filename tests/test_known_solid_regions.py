@@ -72,5 +72,80 @@ class KnownSolidRegionTest(unittest.TestCase):
         self.assertTrue(with_solid.satisfied)
 
 
+class AabbCoveredTest(unittest.TestCase):
+    """Direct tests of _aabb_covered, the exact-coverage algorithm behind every multi-region claim
+    above (a shared face counts, a real gap doesn't). Everything in KnownSolidRegionTest exercises
+    it only through a single observed+solid pair that happens to share a face by construction; none
+    of it would catch a regression in the union logic itself (an L-shaped gap, two regions that
+    overlap instead of merely touching, a query that straddles more than two boxes). This class
+    tests the algorithm on its own, with no swept_path_observed or WorldState involved."""
+
+    def test_two_boxes_sharing_a_face_cover_a_straddling_query(self):
+        left = ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+        right = ((1.0, 0.0, 0.0), (2.0, 1.0, 1.0))  # touches `left` exactly at x=1, no overlap
+        straddling = ((0.5, 0.0, 0.0), (1.5, 1.0, 1.0))
+        self.assertTrue(pc._aabb_covered(*straddling, [left, right]))
+
+    def test_a_real_gap_between_two_boxes_is_not_covered(self):
+        left = ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+        right = ((1.1, 0.0, 0.0), (2.1, 1.0, 1.0))  # 0.1 gap from `left`
+        straddling = ((0.5, 0.0, 0.0), (1.5, 1.0, 1.0))
+        self.assertFalse(pc._aabb_covered(*straddling, [left, right]))
+
+    def test_overlapping_boxes_cover_a_straddling_query(self):
+        # regions that overlap (not just touch) must still union correctly, not double-count
+        left = ((0.0, 0.0, 0.0), (1.2, 1.0, 1.0))
+        right = ((0.8, 0.0, 0.0), (2.0, 1.0, 1.0))
+        straddling = ((0.5, 0.0, 0.0), (1.5, 1.0, 1.0))
+        self.assertTrue(pc._aabb_covered(*straddling, [left, right]))
+
+    def test_l_shaped_union_leaves_the_missing_corner_uncovered(self):
+        # bottom bar + left bar form an L; the top-right cell of their bounding box is in neither
+        bottom = ((0.0, 0.0, 0.0), (2.0, 1.0, 1.0))
+        left = ((0.0, 0.0, 0.0), (1.0, 2.0, 1.0))
+        corner_query = ((0.5, 0.5, 0.0), (1.5, 1.5, 1.0))  # reaches into the L's missing corner
+        self.assertFalse(pc._aabb_covered(*corner_query, [bottom, left]))
+        within_bottom_bar = ((0.0, 0.0, 0.0), (2.0, 1.0, 1.0))
+        self.assertTrue(pc._aabb_covered(*within_bottom_bar, [bottom, left]))
+
+    def test_no_boxes_never_covers(self):
+        self.assertFalse(pc._aabb_covered((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), []))
+
+    def test_degenerate_zero_size_query_still_checked_against_the_union(self):
+        # a zero-radius sphere's bounding box collapses to a point -- must still fail outside coverage
+        box = ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+        inside_point = ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        outside_point = ((5.0, 5.0, 5.0), (5.0, 5.0, 5.0))
+        self.assertTrue(pc._aabb_covered(*inside_point, [box]))
+        self.assertFalse(pc._aabb_covered(*outside_point, [box]))
+
+
+class FiniteBoxTest(unittest.TestCase):
+    """_finite_box: turns a region into a (lo, hi) float tuple, or None if it can't be trusted as
+    coverage -- non-finite, wrong shape, or inverted (min > max, which would otherwise silently
+    invert into a box covering everything OUTSIDE the intended region)."""
+
+    def test_well_formed_region_becomes_float_tuple(self):
+        self.assertEqual(pc._finite_box(TABLE), ((-1.0, -1.0, 0.0), (1.0, 1.0, TABLE_TOP)))
+
+    def test_inverted_box_rejected(self):
+        self.assertIsNone(pc._finite_box(KnownSolidRegion((1.0, 1.0, 1.0), (0.0, 0.0, 0.0))))
+
+    def test_nan_corner_rejected(self):
+        self.assertIsNone(pc._finite_box(KnownSolidRegion((math.nan, 0.0, 0.0), (1.0, 1.0, 1.0))))
+
+    def test_infinite_corner_rejected(self):
+        self.assertIsNone(pc._finite_box(KnownSolidRegion((0.0, 0.0, 0.0), (math.inf, 1.0, 1.0))))
+
+    def test_wrong_arity_rejected(self):
+        self.assertIsNone(pc._finite_box(KnownSolidRegion((0.0, 0.0), (1.0, 1.0))))
+
+    def test_a_box_exactly_at_its_own_bounds_is_well_formed(self):
+        # lo == hi on every axis (a degenerate, zero-volume box) is not "inverted" -- a > b is
+        # false when a == b, so this must be accepted, not rejected.
+        self.assertEqual(pc._finite_box(KnownSolidRegion((1.0, 1.0, 1.0), (1.0, 1.0, 1.0))),
+                          ((1.0, 1.0, 1.0), (1.0, 1.0, 1.0)))
+
+
 if __name__ == "__main__":
     unittest.main()
