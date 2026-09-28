@@ -30,9 +30,15 @@ from .schema import (
     WorldState,
 )
 from .segmentation import GripActionSegmenter
+from .task_policy import RETRYABLE_CHECKS, Task, TaskOutcome, is_retryable, run_task_queue
 from .watchdog import DecisionWatchdog
 
 __all__ = [
+    "RETRYABLE_CHECKS",
+    "Task",
+    "TaskOutcome",
+    "is_retryable",
+    "run_task_queue",
     "GripActionSegmenter",
     "ActionSchemaRegistry",
     "HashChainedDecisionLogger",
