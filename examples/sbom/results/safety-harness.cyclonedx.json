@@ -3,13 +3,13 @@
   "specVersion": "1.5",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-09-28T07:57:16Z",
+    "timestamp": "2026-09-28T09:36:47Z",
     "component": {
       "type": "application",
-      "bom-ref": "pkg:pypi/safety-harness@0.3.3",
+      "bom-ref": "pkg:pypi/safety-harness@0.3.4",
       "name": "safety-harness",
-      "version": "0.3.3",
-      "purl": "pkg:pypi/safety-harness@0.3.3",
+      "version": "0.3.4",
+      "purl": "pkg:pypi/safety-harness@0.3.4",
       "description": "A perception-grounded safety harness for physical AI: default-deny precondition gate for actuators, permission not detection.",
       "licenses": [
         {
@@ -49,7 +49,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:pypi/safety-harness@0.3.3",
+      "ref": "pkg:pypi/safety-harness@0.3.4",
       "dependsOn": [
         "pkg:pypi/pyyaml@6.0.3"
       ]

@@ -428,7 +428,9 @@ class RobotKinematicElectricalLimitTests(unittest.TestCase):
         self.assertFalse(result.satisfied)
 
     def test_joint_velocity_default_deny_without_limits(self):
-        result = pc.joint_velocity_within_limits(None, None, self._traj(fixtures.robot_state()))
+        # robot_state() now reports velocity/effort limits by default too (0.3.4) -- ask explicitly
+        # for the fully sparse state, same as the equivalent position-limits test above.
+        result = pc.joint_velocity_within_limits(None, None, self._traj(fixtures.robot_state(report_wired_limits=False)))
         self.assertFalse(result.satisfied)
 
     def test_joint_velocity_block_over_utilization(self):

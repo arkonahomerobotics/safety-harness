@@ -5,11 +5,17 @@ Uses privileged simulator state directly -- no perception noise yet -- which val
 logic before real perception uncertainty enters the picture. A later real-camera adapter reuses this
 same WorldState shape with confidence fields below 1.0 instead of exactly 1.0.
 
-NOT YET RUN against a live environment: this file imports Isaac Lab APIs (``env.scene[...]``,
-``.data.root_pos_w.torch``, and friends) that only resolve inside the ``vscode`` container with the
-GPU instance running and Isaac Sim launched. It is written to the same conventions used throughout
-this project's other Isaac Lab scripts, but it has not been executed or unit-tested against a real
-``env`` object yet -- do that before trusting it.
+Live-validated: this adapter has been run against a real Isaac-Stack-Cube-Franka-IK-Rel-v0
+environment repeatedly (the closed-loop measurement in ``examples/closed_loop/``, and the demo
+clips under ``examples/live_validation/``), not just unit-tested against mocked Isaac Lab objects.
+The one exception is ``joint_velocity_limits``/``joint_effort_limits``/``estimated_joint_efforts``
+(added alongside ``joint_velocity_within_limits``/``joint_effort_within_limits`` being wired into
+the example schema): the adapter-helper logic that reads them is unit-tested against a mocked
+``robot.data`` object (``tests/test_wired_self_limits.py``), but the real Isaac Lab attribute names
+it depends on (``soft_joint_vel_limits``, ``joint_effort_limits``, ``applied_torque``) were
+confirmed against Isaac Lab's public source, not against this project's actually-installed Isaac Lab
+3.0.0 build -- a live smoke test against the real ``vscode`` container is the remaining step before
+trusting those three fields specifically.
 """
 
 from __future__ import annotations
@@ -29,7 +35,13 @@ from ..schema import (
     TrajectoryPoint,
     WorldState,
 )
-from ._isaac_lab_common import commanded_speed_mps, joint_position_limits, quat_xyzw_to_wxyz
+from ._isaac_lab_common import (
+    commanded_speed_mps,
+    joint_effort_limits_and_estimate,
+    joint_position_limits,
+    joint_velocity_limits,
+    quat_xyzw_to_wxyz,
+)
 from .base import DynamicsAdapter, PerceptionAdapter
 
 # The training cubes are plastic/foam props with no real fragility, but there is no perception
@@ -119,6 +131,7 @@ class IsaacLabCubeStackPerceptionAdapter(PerceptionAdapter):
         ee_pos = (ee_frame.data.target_pos_w.torch[i, 0] - origin).tolist()
         # Mean finger-joint aperture as a 0 (closed) - 1 (open) proxy, resolved by name in __init__.
         gripper = float(robot.data.joint_pos.torch[i, self._finger_ids].mean())
+        effort_limits, applied_efforts = joint_effort_limits_and_estimate(robot, i)
 
         robot_state = RobotProprioception(
             joint_positions=tuple(joint_pos),
@@ -129,6 +142,9 @@ class IsaacLabCubeStackPerceptionAdapter(PerceptionAdapter):
             support_polygon=None,
             rated_payload_kg=FRANKA_PANDA_RATED_PAYLOAD_KG,
             joint_position_limits=joint_position_limits(robot, i, FRANKA_JOINT_LIMIT_EXEMPT),
+            joint_velocity_limits=joint_velocity_limits(robot, i),
+            joint_effort_limits=effort_limits,
+            estimated_joint_efforts=applied_efforts,
             max_cartesian_speed_mps=FRANKA_PANDA_MAX_CARTESIAN_SPEED_MPS,
         )
 

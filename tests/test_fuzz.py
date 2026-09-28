@@ -266,6 +266,19 @@ class RandomFuzzTests(unittest.TestCase):
             q = list(robot.joint_positions)
             q[j] = rng.choice((2.89, -2.89, rng.uniform(-3.5, 3.5)))  # limits are (-2.9, 2.9), margin 0.02
             robot = replace(robot, joint_positions=tuple(q))
+        # joint_velocity_within_limits and joint_effort_within_limits are wired since v0.3.4; without
+        # this the generator only ever produced at-rest joints (0 velocity, 0 effort) and both checks
+        # would sit at fail=0, the same trap joint_position_limits_respected hit in v0.3.1 above.
+        if robot is not None and rng.random() < 0.3:
+            j = rng.randrange(len(robot.joint_velocities))
+            v = list(robot.joint_velocities)
+            v[j] = rng.choice((2.4, -2.4, rng.uniform(-3.0, 3.0)))  # limit is 2.5, 90% utilization = 2.25
+            robot = replace(robot, joint_velocities=tuple(v))
+        if robot is not None and rng.random() < 0.3:
+            j = rng.randrange(len(robot.estimated_joint_efforts))
+            e = list(robot.estimated_joint_efforts)
+            e[j] = rng.choice((85.0, -85.0, rng.uniform(-100.0, 100.0)))  # limit is 87.0, 90% = 78.3
+            robot = replace(robot, estimated_joint_efforts=tuple(e))
         surface_hazards = (
             frozenset(rng.sample(["spill", "smoke", "debris", "ice", "loose_cable"], k=rng.randint(1, 2)))
             if rng.random() < 0.3
