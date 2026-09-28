@@ -1,0 +1,21 @@
+{
+ "gated": false,
+ "human": false,
+ "num_envs": 128,
+ "seed": 1,
+ "success": 123,
+ "success_rate": 0.9609375,
+ "mean_ep_len_success": 444.0731707317073,
+ "decisions": {
+  "reach:ungated": 60099,
+  "grasp:ungated": 266,
+  "place:ungated": 256
+ },
+ "decisions_total": 60621,
+ "blocked_decisions": 0,
+ "block_rate": 0.0,
+ "blocked_by": {},
+ "gate_ms_mean": 0.0,
+ "gate_ms_p99": 0.0,
+ "gate_ms_max": 0.0
+}

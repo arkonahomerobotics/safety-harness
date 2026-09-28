@@ -1,0 +1,28 @@
+{
+ "gated": true,
+ "human": false,
+ "num_envs": 128,
+ "seed": 1,
+ "success": 122,
+ "success_rate": 0.953125,
+ "mean_ep_len_success": 442.6885245901639,
+ "decisions": {
+  "reach:permit": 57566,
+  "reach:block": 2274,
+  "grasp:permit": 262,
+  "place:permit": 252,
+  "place:block": 816,
+  "grasp:block": 38
+ },
+ "decisions_total": 61208,
+ "blocked_decisions": 3128,
+ "block_rate": 0.05110443079336034,
+ "blocked_by": {
+  "decision_within_deadline": 7,
+  "destination_confirmed_stable_and_clear": 816,
+  "joint_position_limits_respected": 2305
+ },
+ "gate_ms_mean": 7.809950749705782,
+ "gate_ms_p99": 24.15998909998393,
+ "gate_ms_max": 969.558271999972
+}

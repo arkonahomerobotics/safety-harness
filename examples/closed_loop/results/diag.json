@@ -1,0 +1,29 @@
+{
+ "gated": true,
+ "human": false,
+ "num_envs": 16,
+ "seed": 1,
+ "success": 15,
+ "success_rate": 0.9375,
+ "mean_ep_len_success": 441.6,
+ "decisions": {
+  "reach:permit": 7051,
+  "grasp:permit": 34,
+  "reach:block": 708,
+  "place:permit": 31
+ },
+ "decisions_total": 7824,
+ "blocked_decisions": 708,
+ "block_rate": 0.09049079754601227,
+ "blocked_by": {
+  "decision_within_deadline": 2,
+  "joint_position_limits_respected": 706
+ },
+ "reasons": {
+  "joint_position_limits_respected: joint 5 at # within #rad of its [#, #] limit at t=#s": 706,
+  "decision_within_deadline: decision took #ms, over its #ms deadline -- every check above evaluated a world that has since moved on": 2
+ },
+ "gate_ms_mean": 6.768121480445618,
+ "gate_ms_p99": 21.052849879949918,
+ "gate_ms_max": 287.6479180001752
+}
