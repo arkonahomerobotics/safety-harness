@@ -51,6 +51,10 @@ evidence, not a certification.
 - `safety_harness/integrity.py` / `safety_harness/pin.py` — action digests and configuration
   pinning (`python -m safety_harness.pin configs/example_action_schema.yaml >
   configs/example_action_schema.yaml.sha256` regenerates the pin; the command prints the digest).
+- `safety_harness/audit_log.py` — persistent, hash-chained (optionally HMAC-keyed) logging:
+  `HashChainedDecisionLogger` (a drop-in `Logger`) and `SoftwareVersionLog` for durable,
+  tamper-evident records; `report_identity()` reports the running harness's own schema/package
+  version and pinned config digest at any time. `verify_log()` re-walks a log file end to end.
 - `safety_harness/action_schema.py` — the YAML-driven registry mapping action types to the checks
   they must pass (`configs/example_action_schema.yaml` is the reference wiring).
 - `tests/` — unit tests, mutation/random-fuzz tests, and reflection-driven black-box contract

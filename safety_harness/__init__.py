@@ -1,4 +1,12 @@
 from .action_schema import ActionSchemaRegistry
+from .audit_log import (
+    HashChainedDecisionLogger,
+    LogIntegrityError,
+    LogVerification,
+    SoftwareVersionLog,
+    report_identity,
+    verify_log,
+)
 from .engine import ActuatorGate, PerceptionFailure
 from .integrity import ConfigIntegrityError, UnverifiableError, seal_action, verify_action_seal, verify_decision_action
 from .schema import (
@@ -24,6 +32,12 @@ from .watchdog import DecisionWatchdog
 
 __all__ = [
     "ActionSchemaRegistry",
+    "HashChainedDecisionLogger",
+    "LogIntegrityError",
+    "LogVerification",
+    "SoftwareVersionLog",
+    "report_identity",
+    "verify_log",
     "ActuatorGate",
     "PerceptionFailure",
     "DecisionWatchdog",
