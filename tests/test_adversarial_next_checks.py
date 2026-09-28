@@ -599,11 +599,18 @@ class SweptPathCoverage(unittest.TestCase):
         self.assertFalse(self._direct(fixtures.WORKSPACE_OBSERVED, margin_m=math.nan).satisfied)
         self.assertFalse(self._direct(fixtures.WORKSPACE_OBSERVED, PredictedTrajectory()).satisfied)
 
-    def test_straddling_two_boxes_counts_as_unobserved(self):
-        """Conservative by design: the union of two boxes is not assumed to be seamless."""
+    def test_straddling_two_face_sharing_boxes_counts_as_observed(self):
+        """Since 0.3.1 coverage is the exact union of observed boxes: two boxes sharing a face leave
+        only a zero-thickness seam, which nothing can hide in. (The first version treated any
+        straddle as unobserved; test_real_gap_between_boxes_is_unobserved is the case that matters.)"""
         split = (ObservedRegion(min_corner=(-1.0, -1.0, -0.5), max_corner=(0.5, 1.0, 1.5)),
                  ObservedRegion(min_corner=(0.5, -1.0, -0.5), max_corner=(2.0, 1.0, 1.5)))
-        self.assertFalse(self._direct(split).satisfied)
+        self.assertTrue(self._direct(split).satisfied)
+
+    def test_real_gap_between_boxes_is_unobserved(self):
+        gap = (ObservedRegion(min_corner=(-1.0, -1.0, -0.5), max_corner=(0.49, 1.0, 1.5)),
+               ObservedRegion(min_corner=(0.51, -1.0, -0.5), max_corner=(2.0, 1.0, 1.5)))
+        self.assertFalse(self._direct(gap).satisfied)
 
     def test_boundary_sphere_exactly_touching_the_box_face_permits(self):
         point = TrajectoryPoint(t=0.0, robot=None, swept_volume_center=(0.5, 0.0, 0.25), swept_volume_radius_m=0.125)

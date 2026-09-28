@@ -6,7 +6,9 @@
 #
 # What the next-safety-checks additions require from an integration (each default-denies without it):
 #   - perception: WorldState.sensor_timestamp (sensor_data_fresh) and WorldState.observed_regions
-#     (swept_path_observed). The Franka and ANYmal reference adapters report both.
+#     (swept_path_observed). The Franka and ANYmal reference adapters report both. Optionally,
+#     WorldState.solid_regions declares known static solid geometry (a tabletop) that counts as
+#     covered, since no agent can be inside it.
 #   - perception: RobotProprioception.joint_position_limits (a None entry explicitly exempts a joint
 #     designed to rest on its stop, e.g. gripper fingers) and max_cartesian_speed_mps
 #     (joint_position_limits_respected, cartesian_speed_within_limits). All three reference adapters
