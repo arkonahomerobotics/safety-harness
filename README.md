@@ -62,6 +62,11 @@ evidence, not a certification.
   [`examples/sbom/`](examples/sbom/) for the checked-in reference output and why CycloneDX, not
   SPDX). Reports exactly one runtime third-party dependency (`pyyaml`) — see that module's
   docstring for why that's the honest answer, not "stdlib only, zero dependencies."
+- `safety_harness/segmentation.py` — `GripActionSegmenter`, turning a continuous grip-based
+  policy's control stream into the discrete `grasp`/`place`/`reach` proposals `gate()` expects, by
+  watching for edges in the commanded grip rather than gating every step — fixes the deadlock a
+  naive per-step "grasp" proposal causes once the fingers make contact (found live on a G1 humanoid
+  stacking task; the fix this extracts is what the closed-loop Franka measurement already validates).
 - `tests/` — unit tests, mutation/random-fuzz tests, and reflection-driven black-box contract
   tests.
 

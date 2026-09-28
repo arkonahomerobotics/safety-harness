@@ -29,9 +29,11 @@ from .schema import (
     TrajectoryPoint,
     WorldState,
 )
+from .segmentation import GripActionSegmenter
 from .watchdog import DecisionWatchdog
 
 __all__ = [
+    "GripActionSegmenter",
     "ActionSchemaRegistry",
     "HashChainedDecisionLogger",
     "LogIntegrityError",
