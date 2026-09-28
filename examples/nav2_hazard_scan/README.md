@@ -75,6 +75,9 @@ map geometry. That's the "writing it up" half of the 2-3 days. This tool targets
   (this public map doesn't ship a `nav2_route` graph — see "Honest limitations" below).
 - **`tests/`**: fast unit tests against small hand-built grids/graphs (`python3 -m unittest discover
   -s examples/nav2_hazard_scan/tests -v`, from the repo root, with `numpy`/`pillow` installed).
+- **`live_costmap.py`** / **`live_scan_demo.py`** / **`Dockerfile.live`**: the same rules fed a real
+  *live* Nav2 costmap instead of a downloaded map file — see "Live variant" below. This is the only
+  part of this directory that needs ROS/rclpy at all; everything above needs none.
 
 ## Run it
 
@@ -103,6 +106,51 @@ the route's own endpoint was computing its forward direction backward (toward wh
 not where it was heading) — caught by testing against a wall placed deliberately at a route's end,
 not caught by the happier all-clear cases. See `hazard_rules.py`'s `_route_headings` docstring.
 
+## Live variant: the same rules against a real running Nav2 costmap
+
+`live_scan_demo.py` proves the same `hazard_rules.py` functions work unmodified against a real
+*live* `/global_costmap/costmap` topic, not just a downloaded `.yaml`/`.pgm` file — a real headless
+Gazebo, a real spawned TurtleBot3, real `nav2_bringup` producing a real costmap, read exactly once
+(see "Design boundary" above for why exactly once, deliberately).
+
+```bash
+docker build --platform linux/amd64 -f examples/nav2_hazard_scan/Dockerfile.live -t nav2-live-scan-demo .
+docker run --platform linux/amd64 --rm nav2-live-scan-demo
+```
+
+Real run, 2026-09-28, output pasted verbatim (trimmed to a representative slice of the 24 real
+findings):
+
+```
+gzserver starting with world /opt/ros/humble/share/turtlebot3_gazebo/worlds/turtlebot3_world.world ...
+Robot spawned
+Launching nav2_bringup against .../maps/warehouse.yaml for a live costmap ...
+Published initial pose (-2.0, -0.5) to bootstrap AMCL
+Live costmap received: 1006x1674 cells @ 0.03m/cell, 1101018 free cells
+FLAG corridor_width_sufficient    only 0.03m clearance to the nearest obstacle, below the 0.3m minimum
+OK   corridor_width_sufficient    1.44m clearance to the nearest obstacle
+...
+FLAG blind_corner_absent          clearest forward sightline only 0.04m, below the 1.5m required stopping sightline
+OK   blind_corner_absent          clearest forward sightline 4.89m
+...
+PASS: 24 findings against a REAL live costmap, same rules as the static-map demo
+```
+
+**A real bug found and fixed by live-diagnosing the actual running container, not guessed:**
+`global_costmap` sat forever logging `Timed out waiting for transform from base_link to map ...
+Invalid frame ID "map" ... frame does not exist`. Root cause, found by execing into a debug
+container and inspecting the real Nav2 lifecycle logs: AMCL never publishes a `map`→`odom` transform
+until it receives an initial pose — nothing in `nav2_bringup`'s default launch provides one
+automatically (that's normally done by hand in RViz). Without that transform, `global_costmap` can
+wait indefinitely for a `map` frame that will never appear, regardless of which map file was given —
+confirmed by testing with the *matching* `turtlebot3_navigation2` map first and seeing the exact same
+symptom. Fixed by publishing one `/initialpose` message at the real known spawn point
+(`turtlebot3_world.launch.py`'s own default `x_pose`/`y_pose`) before waiting for the costmap.
+Deliberately still uses this project's own checked-in `warehouse.yaml`, not a map of the actual
+Gazebo world the robot is standing in — AMCL's own localization accuracy is irrelevant here, since
+nothing downstream of "get one real, structurally valid costmap message" depends on true
+localization.
+
 ## Honest limitations, stated plainly
 
 - **One scenario against one real map, not a validated campaign.** This proves the approach is
@@ -111,6 +159,8 @@ not caught by the happier all-clear cases. See `hazard_rules.py`'s `_route_headi
 - **No real `nav2_route` graph for this map.** `intersection_flagged_for_review` is demonstrated
   against a small, clearly-labeled representative graph in `scan_demo.py`, not this map's own real
   route topology (it doesn't ship one). Fully tested against real graph shapes in `tests/`.
+- **The live variant's map and the Gazebo world it's spawned in don't match** (see above) — fine for
+  proving the live-data plumbing works, not a real site assessment of that world.
 - **Ramps/inclines are out of scope.** A plain 2D occupancy grid carries no elevation data; detecting
   slope hazards needs a supplementary elevation source this tool doesn't have.
 - **Semantic zones (doors, charging stations, load-transfer stations) aren't inferable from raw

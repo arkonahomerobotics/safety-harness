@@ -1,0 +1,27 @@
+# Runs live_scan_demo.py: the same hazard rules as scan_demo.py, fed a real LIVE Nav2 costmap from
+# a real running Gazebo + nav2_bringup, instead of a downloaded map file. Everything else in this
+# directory (map_io.py, geometry.py, hazard_rules.py, tests/) needs no ROS install at all -- only
+# this live variant does, same reasoning as examples/turtlebot3_gazebo_hooks.
+#
+# --platform linux/amd64 for the same reason as turtlebot3_gazebo_hooks/Dockerfile: the Gazebo/
+# turtlebot3 packages this needs ship as prebuilt amd64 binaries only.
+ARG TARGETPLATFORM=linux/amd64
+FROM --platform=$TARGETPLATFORM ros:humble-ros-base
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-pip \
+    ros-humble-turtlebot3-gazebo \
+    ros-humble-turtlebot3-navigation2 \
+    ros-humble-turtlebot3-bringup \
+    ros-humble-nav2-bringup \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+COPY . /workspace
+RUN pip3 install --no-cache-dir . numpy pillow pyyaml
+
+ENV TURTLEBOT3_MODEL=burger
+
+SHELL ["/bin/bash", "-c"]
+CMD source /opt/ros/humble/setup.bash && \
+    python3 -u examples/nav2_hazard_scan/live_scan_demo.py
