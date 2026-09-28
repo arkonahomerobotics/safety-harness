@@ -1,0 +1,62 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-09-28T06:50:39Z",
+    "component": {
+      "type": "application",
+      "bom-ref": "pkg:pypi/safety-harness@0.3.1",
+      "name": "safety-harness",
+      "version": "0.3.1",
+      "purl": "pkg:pypi/safety-harness@0.3.1",
+      "description": "A perception-grounded safety harness for physical AI: default-deny precondition gate for actuators, permission not detection.",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ]
+    },
+    "properties": [
+      {
+        "name": "safety-harness:dev-tooling",
+        "value": "Development/test-only tooling (pytest) is required to run tests/ but is not declared anywhere in pyproject.toml (no [project.optional-dependencies] group exists yet) and is not part of the installed runtime distribution; deliberately excluded from this SBOM's components."
+      },
+      {
+        "name": "safety-harness:dependency-philosophy",
+        "value": "safety_harness/integrity.py describes itself as following 'the same dependency-free rule as the rest of this package'; read literally that overstates the package as a whole -- action_schema.py imports PyYAML unconditionally at runtime, and pyproject.toml correctly declares it. This SBOM lists that one real runtime dependency rather than asserting zero."
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/pyyaml@6.0.3",
+      "name": "PyYAML",
+      "version": "6.0.3",
+      "purl": "pkg:pypi/pyyaml@6.0.3",
+      "description": "YAML parser and emitter for Python",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "pkg:pypi/safety-harness@0.3.1",
+      "dependsOn": [
+        "pkg:pypi/pyyaml@6.0.3"
+      ]
+    },
+    {
+      "ref": "pkg:pypi/pyyaml@6.0.3",
+      "dependsOn": []
+    }
+  ]
+}
