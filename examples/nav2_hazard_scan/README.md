@@ -3,6 +3,29 @@
 A proof-of-concept, not a pivot. Pure Python + numpy + Pillow, no ROS install needed to run it (it
 reads a plain map file), no GPU, no physical robot.
 
+## Design boundary — read before extending this
+
+**This is a pre-deployment analysis tool: read a static map once, produce a report, a human reviews
+it before deployment. It is not, and must not become, a live/runtime system that re-evaluates
+continuously and feeds decisions back into a robot's path planning.** That boundary is deliberate,
+not an accident of the current implementation, and it's the reason this stays a standalone tool
+instead of a `safety_harness` precondition check (see "Where this sits" below): a tool that analyzes
+a static map offline and hands a human a report sits outside "safety component" classification under
+the EU Machinery Regulation (Art. 3(3)) — closer to a CAD safety-check plugin than a runtime safety
+system. The moment something like this re-flags hazards live and feeds directly into path-planning
+decisions, it crosses into the same classification territory `safety_harness` itself already sits
+in, with everything that implies (see the [certification roadmap](https://claude.ai/artifact/99ea5484-d815-4f5b-9bc0-1119140694e7)).
+Legal flagged this as cheaper to design in now than to argue about later — so it's written down here,
+not left implicit. A planned follow-up (running this against a *live* Nav2 costmap topic instead of
+only a downloaded map file) stays inside this boundary as long as it's still a one-time read that
+produces a report for a human — the moment it starts continuously re-evaluating and influencing
+navigation decisions on its own, that's a real classification-relevant design change, not a
+convenience feature, and needs to be flagged as such before it ships.
+
+**Naming:** this is "ISO 3691-4-*mapped* hazard flagging," never "certified against ISO 3691-4" or
+"ISO 3691-4 compliant" — same non-certification framing this project uses everywhere else (see
+"Honest limitations" below and the ISO/TS 15066 caveats in the main README).
+
 ## Why this exists
 
 A [ROS Discourse thread](https://discourse.openrobotics.org/t/iso-risk-assessment/55420) (poster
