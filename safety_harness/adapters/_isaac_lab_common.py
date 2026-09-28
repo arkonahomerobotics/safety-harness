@@ -63,3 +63,34 @@ def joint_position_limits(robot, env_index: int, exempt_name_substrings=()):
         else:
             out.append((float(lo), float(hi)))
     return tuple(out)
+
+
+def joint_velocity_limits(robot, env_index: int):
+    """Per-joint rated |velocity| limit from the simulator's actuator model, in joint_velocities
+    order -- ``robot.data.soft_joint_vel_limits``, the same actuator-model-derived value Isaac Lab
+    itself enforces (distinct from the solver-level ``joint_vel_limits``, which can be looser).
+
+    Unlike ``joint_position_limits``, no per-joint exemption: a rated velocity limit is still a
+    real, meaningful bound for a joint resting at a mechanical stop (a gripper finger) -- it's only
+    *position* limits a joint is designed to sit at. Returns ``None`` for the whole field --
+    unreported, so ``joint_velocity_within_limits`` default-denies -- if any joint's reported limit
+    isn't finite, same discipline as the position-limit helper."""
+    lims = robot.data.soft_joint_vel_limits.torch[env_index].tolist()
+    if not all(math.isfinite(v) for v in lims):
+        return None
+    return tuple(float(v) for v in lims)
+
+
+def joint_effort_limits_and_estimate(robot, env_index: int):
+    """Per-joint rated |effort| limit (``robot.data.joint_effort_limits``, the value the physics
+    engine itself clips computed torques to) and the currently applied/estimated effort
+    (``robot.data.applied_torque``, post actuator-model clipping -- what's actually being commanded
+    this step, not a request that might exceed it), both in joint_positions order.
+
+    Returns ``(None, None)`` -- unreported, default-deny for ``joint_effort_within_limits`` -- if
+    either tensor has a non-finite entry anywhere."""
+    limits = robot.data.joint_effort_limits.torch[env_index].tolist()
+    efforts = robot.data.applied_torque.torch[env_index].tolist()
+    if not all(math.isfinite(v) for v in limits) or not all(math.isfinite(v) for v in efforts):
+        return None, None
+    return tuple(float(v) for v in limits), tuple(float(v) for v in efforts)

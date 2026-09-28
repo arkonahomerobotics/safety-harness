@@ -35,16 +35,27 @@ SAFE_GRIP_FORCE_N = 5.0
 
 
 def robot_state(ee_position=(0.5, 0.0, 0.3), report_wired_limits=True) -> RobotProprioception:
-    """Reports only the two self-limits the example schema wires (joint position limits and the
-    Cartesian speed rating); every other kinematic/electrical limit is unreported -- the sparse
-    default, which every unwired limit check must default-deny. report_wired_limits=False gives the
-    fully sparse state, for testing those two checks' own default-deny."""
+    """Reports only the four self-limits the example schema wires for grasp/place/reach (joint
+    position limits, the Cartesian speed rating, joint velocity limits, joint effort limits + an
+    effort estimate); every other kinematic/electrical limit is unreported -- the sparse default,
+    which every unwired limit check must default-deny. report_wired_limits=False gives the fully
+    sparse state, for testing those checks' own default-deny.
+
+    Velocity/effort limits and the effort estimate joined joint_position_limits and
+    max_cartesian_speed_mps here in 0.3.4, when joint_velocity_within_limits and
+    joint_effort_within_limits were wired into the example schema alongside them -- the robot is at
+    rest (0 velocity, 0 estimated effort), comfortably within any positive limit, so this fixture
+    stays a golden/nominal PERMIT case rather than becoming a new default-deny trap for every
+    existing scenario built on it."""
     return RobotProprioception(
         joint_positions=(0.0,) * 7,
         joint_velocities=(0.0,) * 7,
         end_effector_pose=Pose(position=ee_position),
         gripper_state=1.0,
         joint_position_limits=((-2.9, 2.9),) * 7 if report_wired_limits else None,
+        joint_velocity_limits=(2.5,) * 7 if report_wired_limits else None,
+        joint_effort_limits=(87.0,) * 7 if report_wired_limits else None,
+        estimated_joint_efforts=(0.0,) * 7 if report_wired_limits else None,
         max_cartesian_speed_mps=1.0 if report_wired_limits else None,
     )
 

@@ -14,6 +14,14 @@
 #     (joint_position_limits_respected, cartesian_speed_within_limits). All three reference adapters
 #     report both. Note joint_position_limits_respected checks the joint state the dynamics adapter
 #     carries on each predicted point -- with the reference adapters, the current state only.
+#   - perception: RobotProprioception.joint_velocity_limits, joint_effort_limits and
+#     estimated_joint_efforts (joint_velocity_within_limits, joint_effort_within_limits) -- wired for
+#     grasp/place/reach (the Franka adapter). NOT wired for navigate: the ANYmal-C reference adapter
+#     doesn't report these yet, so wiring it there would default-deny every navigate action. Like the
+#     position-limit check, both read whatever the dynamics adapter carries on each predicted point --
+#     currently the reference adapters' *current* joint state, not a forward prediction of what the
+#     commanded motion will produce. Registered and unit-tested; not yet re-validated live (would need
+#     the GPU box running Isaac Lab -- see the design doc's Live Re-validation section for status).
 #   - the proposer: params.grip_force_n on every grasp (payload_and_grip_force_within_limits), and
 #     params.duration_s or params.commanded_speed_mps when the controller's speed isn't the dynamics
 #     adapter's configured fallback -- that's what cartesian_speed_within_limits and every swept-path
@@ -98,6 +106,12 @@ action_types:
       - name: joint_position_limits_respected
         kwargs:
           safety_margin: 0.02
+      - name: joint_velocity_within_limits
+        kwargs:
+          utilization_limit: 0.9
+      - name: joint_effort_within_limits
+        kwargs:
+          utilization_limit: 0.9
       - name: cartesian_speed_within_limits
         kwargs: {}
       - name: config_integrity_verified
@@ -149,6 +163,12 @@ action_types:
       - name: joint_position_limits_respected
         kwargs:
           safety_margin: 0.02
+      - name: joint_velocity_within_limits
+        kwargs:
+          utilization_limit: 0.9
+      - name: joint_effort_within_limits
+        kwargs:
+          utilization_limit: 0.9
       - name: cartesian_speed_within_limits
         kwargs: {}
       - name: config_integrity_verified
@@ -184,6 +204,12 @@ action_types:
       - name: joint_position_limits_respected
         kwargs:
           safety_margin: 0.02
+      - name: joint_velocity_within_limits
+        kwargs:
+          utilization_limit: 0.9
+      - name: joint_effort_within_limits
+        kwargs:
+          utilization_limit: 0.9
       - name: cartesian_speed_within_limits
         kwargs: {}
       - name: config_integrity_verified

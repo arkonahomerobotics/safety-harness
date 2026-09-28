@@ -19,8 +19,9 @@ confirmed blocking live** in one simulator (Isaac Lab) on two robots, a Franka P
 ANYmal-C quadruped:
 - the hazards were physical in the simulator, commanded by the action, or injected into the
   otherwise-real world state;
-- 1 more check was evaluated live but never the reason for a block, and 6 are registered but not
-  wired into the example config;
+- 1 more check was evaluated live but never the reason for a block; 2 more (`joint_velocity_within_limits`,
+  `joint_effort_within_limits`) are wired into the example config as of 0.3.4 but not yet
+  re-validated live; 4 are registered but not wired into the example config;
 - see the design doc's "Live Re-validation of the Wired Set" for the per-check record.
 
 Plus 239 automated unit/fuzz/mutation/black-box/stress tests. A third adapter (a

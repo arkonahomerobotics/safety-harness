@@ -166,6 +166,51 @@ class JointLimitsFromSimTest(unittest.TestCase):
             joint_names=[f"LF_HAA{k}" for k in range(12)]))
         self.assertIsNone(joint_position_limits(robot, 0))
 
+    def test_velocity_limits_read_from_actuator_model(self):
+        from safety_harness.adapters._isaac_lab_common import joint_velocity_limits
+
+        class _T:
+            def __init__(self, v): self.v = v
+            def tolist(self): return self.v
+        robot = SimpleNamespace(data=SimpleNamespace(soft_joint_vel_limits=SimpleNamespace(torch=[_T([2.5] * 7)])))
+        self.assertEqual(joint_velocity_limits(robot, 0), (2.5,) * 7)
+
+    def test_velocity_limits_non_finite_reports_unreported(self):
+        from safety_harness.adapters._isaac_lab_common import joint_velocity_limits
+
+        class _T:
+            def __init__(self, v): self.v = v
+            def tolist(self): return self.v
+        robot = SimpleNamespace(data=SimpleNamespace(
+            soft_joint_vel_limits=SimpleNamespace(torch=[_T([2.5, float("nan")] + [2.5] * 5)])))
+        self.assertIsNone(joint_velocity_limits(robot, 0))
+
+    def test_effort_limits_and_estimate_read_from_sim(self):
+        from safety_harness.adapters._isaac_lab_common import joint_effort_limits_and_estimate
+
+        class _T:
+            def __init__(self, v): self.v = v
+            def tolist(self): return self.v
+        robot = SimpleNamespace(data=SimpleNamespace(
+            joint_effort_limits=SimpleNamespace(torch=[_T([87.0] * 7)]),
+            applied_torque=SimpleNamespace(torch=[_T([10.0] * 7)])))
+        limits, efforts = joint_effort_limits_and_estimate(robot, 0)
+        self.assertEqual(limits, (87.0,) * 7)
+        self.assertEqual(efforts, (10.0,) * 7)
+
+    def test_effort_non_finite_reports_unreported(self):
+        from safety_harness.adapters._isaac_lab_common import joint_effort_limits_and_estimate
+
+        class _T:
+            def __init__(self, v): self.v = v
+            def tolist(self): return self.v
+        robot = SimpleNamespace(data=SimpleNamespace(
+            joint_effort_limits=SimpleNamespace(torch=[_T([87.0] * 7)]),
+            applied_torque=SimpleNamespace(torch=[_T([float("inf")] + [10.0] * 6)])))
+        limits, efforts = joint_effort_limits_and_estimate(robot, 0)
+        self.assertIsNone(limits)
+        self.assertIsNone(efforts)
+
 
 class ExampleSchemaWiringTest(unittest.TestCase):
     def test_wired_where_meaningful(self):
@@ -175,9 +220,14 @@ class ExampleSchemaWiringTest(unittest.TestCase):
         for a in ("grasp", "place", "reach"):
             self.assertIn("joint_position_limits_respected", names[a])
             self.assertIn("cartesian_speed_within_limits", names[a])
+            self.assertIn("joint_velocity_within_limits", names[a])
+            self.assertIn("joint_effort_within_limits", names[a])
         self.assertIn("cartesian_speed_within_limits", names["navigate"])
         # the ANYmal-C sim asset has no joint limits to check against -- see the config comment
         self.assertNotIn("joint_position_limits_respected", names["navigate"])
+        # the ANYmal-C reference adapter doesn't report velocity/effort limits yet either
+        self.assertNotIn("joint_velocity_within_limits", names["navigate"])
+        self.assertNotIn("joint_effort_within_limits", names["navigate"])
 
 
 if __name__ == "__main__":
