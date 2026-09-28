@@ -20,6 +20,7 @@ from .schema import (
     AgentCategory,
     FallConsequence,
     HazardTag,
+    KnownSolidRegion,
     ObservedRegion,
     PredictedTrajectory,
     PreconditionResult,
@@ -1101,6 +1102,44 @@ def _sphere_inside_region(center, radius: float, region: ObservedRegion) -> bool
     return True
 
 
+def _finite_box(region):
+    """(lo, hi) as float triples if the region is a well-formed finite box, else None."""
+    try:
+        lo, hi = tuple(region.min_corner), tuple(region.max_corner)
+    except (TypeError, AttributeError):
+        return None
+    if len(lo) != 3 or len(hi) != 3:
+        return None
+    if not all(_is_real_number(v) and math.isfinite(v) for v in lo + hi):
+        return None
+    if any(a > b for a, b in zip(lo, hi)):
+        return None
+    return tuple(float(v) for v in lo), tuple(float(v) for v in hi)
+
+
+def _aabb_covered(lo, hi, boxes) -> bool:
+    """Is the axis-aligned box [lo, hi] entirely inside the union of ``boxes``? Exact, by coordinate
+    compression: split [lo, hi] at every box face inside it, and require the midpoint of every
+    resulting cell to lie in some box. (Cells are either wholly inside a box or wholly outside it.)"""
+    if not boxes:
+        return False
+    cuts = []
+    for ax in range(3):
+        pts = {lo[ax], hi[ax]}
+        for blo, bhi in boxes:
+            for v in (blo[ax], bhi[ax]):
+                if lo[ax] < v < hi[ax]:
+                    pts.add(v)
+        cuts.append(sorted(pts))
+    for x0, x1 in zip(cuts[0], cuts[0][1:] or cuts[0]):
+        for y0, y1 in zip(cuts[1], cuts[1][1:] or cuts[1]):
+            for z0, z1 in zip(cuts[2], cuts[2][1:] or cuts[2]):
+                m = ((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2)
+                if not any(all(b[0][k] <= m[k] <= b[1][k] for k in range(3)) for b in boxes):
+                    return False
+    return True
+
+
 def swept_path_observed(
     state: WorldState, action: Action, trajectory: PredictedTrajectory, *,
     margin_m: float = 0.15,
@@ -1117,9 +1156,12 @@ def swept_path_observed(
     This is coverage, deliberately distinct from confidence. Observed-but-uncertain (fog, glare, a
     low-confidence track) is still visibility_above_threshold's and the tracking checks' job;
     unobserved is this one's. Every predicted point's swept sphere, inflated by ``margin_m``, must
-    lie entirely inside at least one ``WorldState.observed_regions`` box. Straddling two overlapping
-    boxes counts as unobserved -- conservative, never optimistic. Coverage unreported (None), empty,
-    or made only of malformed/non-finite regions: default-deny.
+    lie entirely inside the union of the ``WorldState.observed_regions`` boxes and any declared
+    ``WorldState.solid_regions`` (known static solid geometry, where no agent can be). The union is
+    tested exactly over the sphere's bounding box, which contains the sphere, so this stays
+    conservative. Coverage unreported (None), empty, or made only of malformed/non-finite regions:
+    default-deny. Solid regions can only add coverage next to observed space; they never stand in
+    for observation where an agent could actually be.
 
     ``margin_m`` defaults to the same 0.15m as the other swept-path checks. In a speed-and-
     separation-monitored cell, set it to at least the protective separation distance: an unobserved
@@ -1134,9 +1176,20 @@ def swept_path_observed(
         return _fail(name, "no observed region reported -- nothing was observed, so no path through it is confirmed clear")
     if not trajectory.points:
         return _fail(name, "no predicted trajectory to evaluate")
+    solids = state.solid_regions if isinstance(state.solid_regions, (tuple, list)) else ()
+    boxes = [b for b in (_finite_box(r) for r in valid) if b is not None]
+    boxes += [b for b in (_finite_box(r) for r in solids if isinstance(r, KnownSolidRegion)) if b is not None]
     for point in trajectory.points:
         radius = point.swept_volume_radius_m + margin_m
-        if not any(_sphere_inside_region(point.swept_volume_center, radius, region) for region in valid):
+        if any(_sphere_inside_region(point.swept_volume_center, radius, region) for region in valid):
+            continue  # fast path: wholly inside one observed box
+        c = point.swept_volume_center
+        try:
+            ok_geom = (len(c) == 3 and all(_is_real_number(v) and math.isfinite(v) for v in c)
+                       and _is_real_number(radius) and math.isfinite(radius) and radius >= 0)
+        except TypeError:
+            ok_geom = False
+        if not (ok_geom and _aabb_covered(tuple(v - radius for v in c), tuple(v + radius for v in c), boxes)):
             return _fail(
                 name,
                 f"swept volume at t={point.t:.2f}s (center {point.swept_volume_center}, radius+margin {radius:.2f}m) "

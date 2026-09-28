@@ -16,7 +16,7 @@ from typing import Optional
 # 0.3.0: additive only -- every field added below defaults to "unreported", which every check that
 # reads it treats as default-deny, so an adapter written against 0.2.0 still constructs valid
 # objects; it just can't PERMIT through a check that needs the new evidence until it reports it.
-SCHEMA_VERSION = "0.3.0"
+SCHEMA_VERSION = "0.3.1"
 
 
 class HazardTag(str, Enum):
@@ -168,6 +168,20 @@ class ObservedRegion:
 
 
 @dataclass(frozen=True)
+class KnownSolidRegion:
+    """An axis-aligned box known to be filled by static solid geometry -- a tabletop, a wall, the
+    robot's own mounting -- from a static map or the cell's known layout, NOT from this cycle's
+    perception. No agent can be inside solid geometry, so it needs no observation: see
+    swept_path_observed, which counts observed and known-solid space together as covered. Without
+    this, a swept path near a table always blocks, because its safety margin dips into the space
+    under the tabletop that no camera can see (measured: ~98% of nominal near-table reaches in the
+    G1 stacking test)."""
+
+    min_corner: tuple[float, float, float]
+    max_corner: tuple[float, float, float]
+
+
+@dataclass(frozen=True)
 class WorldState:
     objects: tuple = ()
     agents: tuple = ()
@@ -185,6 +199,9 @@ class WorldState:
     # Every region perception actually observed this cycle, as ObservedRegion boxes. None =
     # coverage unreported; () = nothing observed. Both default-deny in swept_path_observed.
     observed_regions: Optional[tuple] = None
+    # Known static solid geometry (KnownSolidRegion boxes). None/() = none declared, which only
+    # means nothing extra counts as covered -- it can never make an unobserved path pass.
+    solid_regions: Optional[tuple] = None
 
 
 @dataclass(frozen=True)

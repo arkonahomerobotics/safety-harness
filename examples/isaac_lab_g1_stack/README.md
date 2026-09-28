@@ -154,7 +154,7 @@ What the nominal smoke runs found (8–16 envs, `ft2_rc_300`):
    - scenario metrics: minimum hand-to-human distance, whether the heavy block was lifted, motion
      on NaN perception, tampered commands executed.
 4. **Harness follow-ups surfaced here.**
-   - `swept_path_observed` needs known-solid regions.
+   - `swept_path_observed` needs known-solid regions (added in 0.3.1: `WorldState.solid_regions`; not yet re-run live on G1).
    - `DecisionWatchdog` deadline should be set from the real control cycle (20 ms here).
    - Seed-to-seed variance of the success numbers.
 5. **Release.** Bump to 0.3.0 and publish to PyPI after review. Update external numbers only once
