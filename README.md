@@ -24,10 +24,13 @@ ANYmal-C quadruped:
   re-validated live; 4 are registered but not wired into the example config;
 - see the design doc's "Live Re-validation of the Wired Set" for the per-check record.
 
-Plus 239 automated unit/fuzz/mutation/black-box/stress tests. A third adapter (a
+Plus 352 automated unit/fuzz/mutation/black-box/stress tests. A third simulated adapter (a
 Unitree G1 humanoid with a dexterous hand) ships with a trained block-stacking policy to gate — see
 [`examples/isaac_lab_g1_stack`](examples/isaac_lab_g1_stack/); gating that policy under injected
-hazards is in progress, not yet a validation result. It has **not**
+hazards is in progress, not yet a validation result. A fourth adapter targets a real ROS 2 graph
+instead of a simulator — see [`examples/ros2_hooks`](examples/ros2_hooks/); it demonstrates the
+software genuinely integrates into a real ROS 2 control loop, not a physical-hardware validation
+result either. It has **not**
 been reviewed by a functional-safety assessor
 against IEC 61508, ISO 13849, or ISO 10218/TS 15066 — see the design doc's Scope & Non-Goals
 section for what's out of scope today (joint-space kinematic checks, certified numeric
@@ -73,9 +76,11 @@ evidence, not a certification.
 
 Robot-specific behavior lives entirely behind four adapter interfaces
 (`PerceptionAdapter`, `DynamicsAdapter`, `FallbackController`, `Logger`) so the engine and checks
-are robot-agnostic. Reference adapters exist for three Isaac Lab robots: Franka Panda
-(`adapters/isaac_lab.py`), ANYmal-C (`adapters/isaac_lab_anymal.py`) and Unitree G1
-(`adapters/isaac_lab_g1.py`).
+are robot-agnostic. Reference adapters exist for three Isaac Lab robots (Franka Panda,
+`adapters/isaac_lab.py`; ANYmal-C, `adapters/isaac_lab_anymal.py`; Unitree G1,
+`adapters/isaac_lab_g1.py`) and, since 0.3.8, a real ROS 2 graph instead of a simulator
+(`adapters/ros2.py` — see [`examples/ros2_hooks`](examples/ros2_hooks/) for a runnable, self-checking
+demonstration against real `rclpy` nodes, verified in a `ros:humble-ros-base` container).
 
 **Not yet independently verified** (deliberately flagged, not buried): the ISO/TS 15066 Table A.2
 body-region force figures, the child clearance and the crowd factors in
