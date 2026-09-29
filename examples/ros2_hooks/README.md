@@ -23,7 +23,9 @@ process).
 
 **What this does NOT prove:** this is not a substitute for real-hardware validation. ISO 13849-2
 requires actual fault-condition testing on physical hardware for a certifiable Performance Level
-claim -- see the design doc and the [certification roadmap](https://claude.ai/artifact/99ea5484-d815-4f5b-9bc0-1119140694e7).
+claim -- see the design doc's [Development Roadmap](../../docs/design.md#development-roadmap)
+(stages 6-7: real perception, then real hardware, both still ahead) and
+[Certification packaging](../../docs/design.md#commercialization).
 This proves the *software* correctly plugs into a real ROS 2 system; it says nothing about actuator
 faults, sensor faults, or anything downstream of the topics it reads. Not wasted work either, though:
 [The Construct's UR3e remote lab](https://www.theconstruct.ai/warehouse-robot-lab/) (found while
