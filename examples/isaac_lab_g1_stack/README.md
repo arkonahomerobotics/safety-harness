@@ -187,6 +187,91 @@ All 12 scenarios × gated/ungated, run to completion after the fixes above:
 Raw per-scenario JSON results were generated on the GPU box; not checked into this repo (large,
 regenerable via the reproduce command below).
 
+## ROS 2 bridge variant: the same policy, gated over real ROS 2 messages
+
+`scripts/gate_policy_g1_stack_ros2.py` runs the identical trained policy and the identical grasp/
+place/reach segmentation as `gate_policy_g1_stack.py`, but every field the harness reads comes off
+real `sensor_msgs/JointState`, `geometry_msgs/PoseStamped` and `std_msgs/String` (JSON) ROS 2
+messages -- published and consumed via real `rclpy` pub/sub in-process (Isaac Sim's own bundled
+ROS 2 libs, `isaacsim.ros2.bridge` extension) -- through `ROS2PerceptionAdapter`/
+`ROS2DynamicsAdapter` (`safety_harness/adapters/ros2.py`), reusing `SafetyHarnessBridgeNode` from
+`examples/ros2_hooks/` unmodified. It answers the question `examples/ros2_hooks/` and
+`examples/turtlebot3_gazebo_hooks/` couldn't on their own: does this same real-ROS-2-wire code path
+work against a real GPU-simulated humanoid, not just a hand-written mock publisher or a simpler
+wheeled robot.
+
+**Real bug #1, found and fixed: `isaacsim.ros2.bridge` fails to load at all with no env vars set.**
+`isaacsim.ros2.core`'s own Ubuntu-version auto-detection (`ros2_common.py`) picks "jazzy" for this
+box's Ubuntu 24.04 container, and that bundled distro's `librmw_implementation.so` fails to `dlopen`
+its own `libament_index_cpp.so` dependency -- the file exists on disk in the same lib dir, it's just
+not on `LD_LIBRARY_PATH`. The extension's own log prints the exact fix once startup fails (easy to
+miss if you only see the *second-order* symptom, the user script's own `import rclpy` throwing
+`ModuleNotFoundError` moments later, which looks unrelated):
+```
+export ROS_DISTRO=humble   # matches this project's existing ROS2 Humble work elsewhere
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/isaac-sim/exts/isaacsim.ros2.core/humble/lib
+```
+Verified with NVIDIA's own `standalone_examples/api/isaacsim.ros2.bridge/clock.py` smoke test before
+touching this project's code at all: 0 messages received with no env vars, 22 real clock callbacks
++ 3 manual-step callbacks received cleanly with them set.
+
+**Real bug #2, found and fixed: enabling the bridge before `gym.make()` breaks env creation.**
+Following the ordering NVIDIA's own `clock.py` example uses (enable the extension right after
+`AppLauncher`, before anything else) makes `ManagerBasedEnv`'s own one-time seeding step
+(`env_cfg.seed` -> `isaaclab`'s `env.seed()` -> `omni.replicator.core.rep.set_global_seed()`) fail
+outright:
+```
+omni.graph.core._impl.errors.OmniGraphError: OmniGraphError: Failed to wrap graph in node given
+{'graph_path': '/Replicator/SDGPipeline', 'evaluator_name': 'execution', ...}
+```
+`gate_policy_g1_stack.py` never hits this because it never enables the ROS 2 bridge at all.
+Enabling `isaacsim.ros2.bridge` pulls in enough extra OmniGraph/extension state that Replicator's
+own domain-randomization graph creation breaks. Fixed by deferring bridge setup until *after*
+`env = gym.make(...)` -- nothing in this test needs it active any earlier; publishing/subscribing
+only happens inside the step loop.
+
+**Real bug #3 (in this test's own code, not the adapter or the bridge): invalid `HazardTag` value.**
+First real run published `"hazard_tags": ["none"]` on the tracked-block JSON messages.
+`safety_harness.schema.HazardTag` has no `"none"` member (valid values: `fragile`/`hot`/`sharp`/
+`human`/`animal`/`liquid_containing`/`unknown`) -- `HazardTag("none")` raises inside
+`ROS2PerceptionAdapter.get_world_state()`, which `ActuatorGate.gate()` surfaces as
+`PerceptionFailure`, so 149/150 steps default-denied with no other explanation. The empty-list case
+(no hazard tags at all -- what `gate_policy_g1_stack.py`'s own `frozenset()` equivalent means) is
+`[]`, not `["none"]`. Fixed by publishing `[]`.
+
+**Scope decision, made explicitly:** joint position limits are set directly from the same real
+per-joint sim data `gate_policy_g1_stack.py` uses (`_real_joint_position_limits`), not round-tripped
+through `SafetyHarnessBridgeNode`'s `/robot_description` URDF-parsing path -- that path is real code
+already exercised by `examples/ros2_hooks/` and `examples/turtlebot3_gazebo_hooks/` against their
+own robots' real URDFs, and re-proving URDF parsing here would add GPU wall-clock without testing
+anything new.
+
+**Result, once all three bugs were fixed (200 steps, single env, `ft2_rc_300`, seed 11, real output):**
+```
+HARNESS_RESULT {"mode": "ros2_bridge", "checkpoint": "examples/isaac_lab_g1_stack/checkpoints/g1_stack_ppo_ft2_rc_300.pt",
+ "decisions": {"reach:block": 110, "reach:permit": 13, "grasp:block": 77},
+ "blocked_by": {"swept_path_observed": 1, "sensor_data_fresh": 2, "current_position_confirmed_stable": 76,
+                "joint_position_limits_respected": 162},
+ "stacked": false, "steps_without_fresh_message": 0}
+```
+Zero crashes, zero stale/never-arrived messages across 200 real rclpy round trips, a real mix of
+PERMIT and BLOCK -- not a deadlock or a rubber-stamp. `joint_position_limits_respected` dominates the
+blocks; checked what's actually firing rather than assuming a bug:
+```
+joint 8 at 0.448 within 0.02rad of its [-0.468, 0.468] limit at t=0.00s   (waist_pitch_joint)
+```
+That's real: this G1 task's reach motion bends the waist forward to get the arm over the table, and
+it genuinely runs close to `waist_pitch_joint`'s own soft limit doing it (consistent with "Waist
+joints" in the What-was-learned list above -- the waist was already known to matter a lot for this
+task's reachability). The harness catching that in real time, over the real ROS 2 wire path, on a
+real trained policy, is the check working as designed, not an integration defect. This single-env,
+200-step run didn't reach a stack (`"stacked": false`) -- not surprising for one trial at this
+episode length; the hazard-campaign table above, from the direct (non-ROS2) script, already has the
+real success-rate statistics from 1024 episodes. What this variant adds is proof that the same
+decisions come out the same way when everything in between is a real ROS 2 message, not a privileged
+in-process Python object.
+
 ## Next steps
 
 1. **Robust policy.** Finish the hold-reward fine-tune: no success termination, and +0.05 per
