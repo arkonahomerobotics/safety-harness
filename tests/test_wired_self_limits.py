@@ -62,6 +62,32 @@ class JointLimitExemptionsTest(unittest.TestCase):
         self.assertFalse(pc.joint_position_limits_respected(None, None, _traj(r)).satisfied)
 
 
+class MismatchedLimitsLengthFailsClosedTest(unittest.TestCase):
+    """joint_velocity_within_limits, joint_effort_within_limits, and
+    motor_temperature_within_limits each zip() a reading against a limits sequence with no length
+    check -- the identical flaw joint_position_limits_respected's own docstring already documented
+    as fixed once (zip() silently truncates to the shorter sequence, so any joint past the end of a
+    too-short limits list is never checked at all). Never propagated to these three siblings when
+    they were wired in. Found by an independent third-party review, 2026-09-29, and reproduced here
+    exactly as reported: a joint doing real damage (10 rad/s against a 2.5 rad/s rated limit) PERMIT
+    ted end to end because the limits list was one entry short."""
+
+    def test_fewer_velocity_limits_than_joints_fails_closed(self):
+        r = replace(fixtures.instrumented_robot_state(), joint_velocities=(0.0,) * 7 + (10.0,),
+                    joint_velocity_limits=(2.5,) * 7)  # one too few -- joint 7's 10 rad/s never checked
+        self.assertFalse(pc.joint_velocity_within_limits(None, None, _traj(r)).satisfied)
+
+    def test_fewer_effort_limits_than_estimates_fails_closed(self):
+        r = replace(fixtures.instrumented_robot_state(), estimated_joint_efforts=(0.0,) * 7 + (500.0,),
+                    joint_effort_limits=(87.0,) * 7)  # one too few -- joint 7's 500 N*m never checked
+        self.assertFalse(pc.joint_effort_within_limits(None, None, _traj(r)).satisfied)
+
+    def test_fewer_temperature_limits_than_readings_fails_closed(self):
+        r = replace(fixtures.instrumented_robot_state(), motor_temperature_c=(40.0,) * 7 + (150.0,),
+                    motor_temperature_limit_c=(80.0,) * 7)  # one too few -- joint 7's 150C never checked
+        self.assertFalse(pc.motor_temperature_within_limits(WorldState(robot=r), None, None).satisfied)
+
+
 class CommandedSpeedTest(unittest.TestCase):
     def test_duration_sets_speed(self):
         self.assertAlmostEqual(commanded_speed_mps(Action("reach", {"duration_s": 0.05}), 2.0, 0.5), 40.0)

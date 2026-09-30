@@ -9,6 +9,14 @@ physical actuators. Every action a robot proposes — grasp, place, reach, anyth
 register — must earn a `PERMIT` from measured, structured evidence before it executes. No
 evidence, or a failed check, or an adapter that raises: `BLOCK`. Permission, not detection.
 
+**"Perception-grounded" describes the architecture's contract, not today's sensing maturity.**
+`ActuatorGate` only ever decides from a structured `WorldState`, never from a raw sensor stream or a
+policy's own claim — that boundary is real and enforced. But every adapter shipped today reads
+either privileged simulator ground truth (Isaac Lab) or a hand-populated/mocked bridge object (ROS 2
+hooks, TurtleBot3) — there is no real camera/lidar perception pipeline (object detection, tracking)
+behind any of them yet. Read "perception-grounded" as "built so a real perception pipeline plugs
+straight into the same contract with zero engine changes," not as "already running one."
+
 Full design spec, architecture, worked examples, test/validation record, and roadmap:
 **[Perception-Grounded Safety Harness for Physical AI — design doc](docs/design.md)**.
 
@@ -16,13 +24,24 @@ Full design spec, architecture, worked examples, test/validation record, and roa
 
 Reference implementation, not yet independently assessed. Of its 31 precondition checks, **24 are
 confirmed blocking live** in one simulator (Isaac Lab) on two robots, a Franka Panda arm and an
-ANYmal-C quadruped:
-- the hazards were physical in the simulator, commanded by the action, or injected into the
-  otherwise-real world state;
+ANYmal-C quadruped — but that number is a mix of two different kinds of evidence, and the headline
+figure alone doesn't say which is which, so here it is split out rather than left blended:
+- **6 blocked on a genuinely real, un-modified simulator condition** — 4 on a physical state change
+  (e.g. a joint driven to its real limit) and 2 on the action's own commanded parameters (e.g. an
+  over-speed reach or an over-force grip). These are the strongest evidence: nothing about the
+  world state was altered to produce them.
+- **18 blocked because a test wrapper overrode one field of an otherwise-real world state** (e.g.
+  setting a tracked agent's category to CHILD, or a sensor timestamp to stale) — real code, real
+  `ActuatorGate` decision path, but the hazardous condition itself was injected by the test, not
+  independently produced by the simulator or the commanded action. This is standard fault-injection
+  testing and is how most of these checks *can* currently be exercised at all (the simulator has no
+  built-in way to, say, spawn a child near the robot on its own) — but it's a materially weaker
+  claim than the physical/commanded 6, and shouldn't be read as equivalent to it.
 - 1 more check was evaluated live but never the reason for a block; 2 more (`joint_velocity_within_limits`,
   `joint_effort_within_limits`) are wired into the example config as of 0.3.4 but not yet
   re-validated live; 4 are registered but not wired into the example config;
-- see the design doc's "Live Re-validation of the Wired Set" for the per-check record.
+- see the design doc's "Live Re-validation of the Wired Set" for the per-check record, including
+  exactly which check is in which tier.
 
 Plus 352 automated unit/fuzz/mutation/black-box/stress tests. A third simulated adapter (a
 Unitree G1 humanoid with a dexterous hand) ships with a trained block-stacking policy to gate — see
@@ -116,6 +135,16 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ## Usage
 
+**`pip install safety-harness` gives you the importable `safety_harness` package only** —
+`configs/` (the example action schema and its digest pin) is a reference file in this *repository*,
+not packaged into the wheel/sdist (`[tool.setuptools.packages.find]` in `pyproject.toml` includes
+only `safety_harness*`). That's deliberate, not an oversight: the schema is meant to be *yours*,
+written and digest-pinned for your own robot's real checks, the same way `configs/g1_action_schema.yaml`
+and `configs/turtlebot3_action_schema.yaml` are each specific to their own robot rather than shared.
+`configs/example_action_schema.yaml` below is the reference shape to copy from — either clone this
+repo, or fetch just that file and its `.sha256` from
+[`configs/` on GitHub](https://github.com/naganumakr/safety-harness/tree/main/configs).
+
 ```python
 from safety_harness import ActionSchemaRegistry, ActuatorGate, DecisionWatchdog
 from safety_harness.adapters import FreezeInPlaceFallback, InMemoryLogger
@@ -125,7 +154,7 @@ from safety_harness.adapters.isaac_lab import (
 )
 from safety_harness.integrity import read_digest_file
 
-cfg = "configs/example_action_schema.yaml"
+cfg = "configs/example_action_schema.yaml"  # path to your own copy -- see note above
 # Pin the config to its known-good digest: a registry loaded without one blocks every action
 # (config_integrity_verified), and one whose file doesn't match refuses to construct.
 schema = ActionSchemaRegistry.from_yaml(cfg, expected_digest=read_digest_file(cfg + ".sha256"))
@@ -157,10 +186,11 @@ coordinated-disclosure policy: [SECURITY.md](SECURITY.md).
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The engine, the adapter
-interfaces, and the conformance test suite are all open under this license: the goal is for any
-robot maker to implement the four adapters for their own stack and run the same conformance suite
+interfaces, and the existing black-box/fuzz test suites are all open under this license: the goal
+is for any robot maker to implement the four adapters for their own stack and run the same tests
 against it, not to license the core code per-implementation. See the design doc's Release &
-Distribution section for the reasoning and the certification model this enables.
+Distribution section for the reasoning and the certification model this enables (aspirational —
+a real, separately-packaged third-party conformance fixture doesn't exist yet, see the Roadmap).
 
 ## Contributing an adapter
 
@@ -169,6 +199,7 @@ Distribution section for the reasoning and the certification model this enables.
 2. Run the black-box and fuzz test suites against your adapter's `WorldState`/`PredictedTrajectory`
    output — they're written against the interfaces, not the Isaac Lab implementation, so they
    should run unmodified.
-3. Open an issue or PR with your results. Passing the conformance suite is what "compliant
-   adapter" means here — there's no separate certification process yet, but that's the intent
-   (see the design doc's Roadmap).
+3. Open an issue or PR with your results. Passing those tests is what "compliant adapter" means
+   here today — there's no separate conformance fixture, submission process, or certification mark
+   yet, just these adapter-generic tests; a real third-party-facing conformance process is intent,
+   not current state (see the design doc's Roadmap).

@@ -14,8 +14,9 @@ a static map offline and hands a human a report sits outside "safety component" 
 the EU Machinery Regulation (Art. 3(3)) — closer to a CAD safety-check plugin than a runtime safety
 system. The moment something like this re-flags hazards live and feeds directly into path-planning
 decisions, it crosses into the same classification territory `safety_harness` itself already sits
-in, with everything that implies (see the [certification roadmap](https://claude.ai/artifact/99ea5484-d815-4f5b-9bc0-1119140694e7)).
-Legal flagged this as cheaper to design in now than to argue about later — so it's written down here,
+in, with everything that implies (see the design doc's
+[Development Roadmap](../../docs/design.md#development-roadmap)).
+Internal legal research (not outside counsel) flagged this as cheaper to design in now than to argue about later — so it's written down here,
 not left implicit. A planned follow-up (running this against a *live* Nav2 costmap topic instead of
 only a downloaded map file) stays inside this boundary as long as it's still a one-time read that
 produces a report for a human — the moment it starts continuously re-evaluating and influencing

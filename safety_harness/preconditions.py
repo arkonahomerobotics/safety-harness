@@ -614,11 +614,22 @@ def joint_velocity_within_limits(
 ) -> PreconditionResult:
     """Does the predicted motion keep every joint's speed within a fraction of its rated limit --
     this is also where an unmodeled kinematic singularity would show up, since required joint
-    speeds spike near one even for a modest commanded Cartesian speed."""
+    speeds spike near one even for a modest commanded Cartesian speed.
+
+    A limits tuple whose length doesn't match the joint state fails closed -- the same fix
+    ``joint_position_limits_respected`` already made once for the identical flaw (zip() silently
+    truncates to the shorter sequence, leaving any unmatched joint unchecked), not propagated to
+    this sibling when it was wired in later. Found by an independent third-party review, 2026-09-29.
+    """
     for point in trajectory.points:
         robot = point.robot
         if robot is None or robot.joint_velocity_limits is None:
             return _fail("joint_velocity_within_limits", "no joint velocity limits reported -- default-deny")
+        if len(robot.joint_velocity_limits) != len(robot.joint_velocities):
+            return _fail(
+                "joint_velocity_within_limits",
+                f"{len(robot.joint_velocity_limits)} joint velocity limits reported for {len(robot.joint_velocities)} joints -- default-deny",
+            )
         for j, (vel, limit) in enumerate(zip(robot.joint_velocities, robot.joint_velocity_limits)):
             if _exceeds(abs(vel), utilization_limit * limit):
                 return _fail(
@@ -633,11 +644,20 @@ def joint_effort_within_limits(
     utilization_limit: float = 0.9,
 ) -> PreconditionResult:
     """Does the predicted motion keep every joint's torque/current within its rated limit -- the
-    electrical/mechanical load side, distinct from position or speed."""
+    electrical/mechanical load side, distinct from position or speed.
+
+    A limits tuple whose length doesn't match the effort estimate fails closed -- see
+    ``joint_velocity_within_limits``'s docstring for why this check needs the same guard.
+    """
     for point in trajectory.points:
         robot = point.robot
         if robot is None or robot.joint_effort_limits is None or robot.estimated_joint_efforts is None:
             return _fail("joint_effort_within_limits", "no joint effort limits/estimate reported -- default-deny")
+        if len(robot.joint_effort_limits) != len(robot.estimated_joint_efforts):
+            return _fail(
+                "joint_effort_within_limits",
+                f"{len(robot.joint_effort_limits)} joint effort limits reported for {len(robot.estimated_joint_efforts)} joints -- default-deny",
+            )
         for j, (effort, limit) in enumerate(zip(robot.estimated_joint_efforts, robot.joint_effort_limits)):
             if _exceeds(abs(effort), utilization_limit * limit):
                 return _fail(
@@ -653,10 +673,19 @@ def motor_temperature_within_limits(
 ) -> PreconditionResult:
     """Is every joint's motor currently cool enough to safely take on more sustained load? This
     checks the robot's *current* temperature, not a forward thermal simulation -- a coarse but
-    honest proxy: don't add load to a motor that's already close to its limit."""
+    honest proxy: don't add load to a motor that's already close to its limit.
+
+    A limits tuple whose length doesn't match the temperature reading fails closed -- see
+    ``joint_velocity_within_limits``'s docstring for why this check needs the same guard.
+    """
     robot = state.robot
     if robot is None or robot.motor_temperature_c is None or robot.motor_temperature_limit_c is None:
         return _fail("motor_temperature_within_limits", "no motor temperature reported -- default-deny")
+    if len(robot.motor_temperature_limit_c) != len(robot.motor_temperature_c):
+        return _fail(
+            "motor_temperature_within_limits",
+            f"{len(robot.motor_temperature_limit_c)} motor temperature limits reported for {len(robot.motor_temperature_c)} motors -- default-deny",
+        )
     for j, (temp, limit) in enumerate(zip(robot.motor_temperature_c, robot.motor_temperature_limit_c)):
         if _exceeds(temp, limit - safety_margin_c):
             return _fail(
