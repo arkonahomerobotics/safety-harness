@@ -111,9 +111,12 @@ A BLOCK freezes the arm and holds the grip. Execution goes through `verify_decis
 
 **`--video <path.mp4>` renders an annotated demo clip** of env 0 (use `--num_envs 1`; `--max_steps`
 caps the episode for a smoke test before committing to a full render). Depends on
-`overlay.annotate`/`write_mp4` from `/workspace/isaaclab/overlay.py` -- like the Franka and
-ANYmal-C demo scripts, that helper is a box-only file, not checked into this repo; `--video` will
-fail on import outside an environment that already has it.
+`overlay.annotate`/`write_mp4`, now `scripts/overlay.py` in this repo (PIL for the caption bars,
+imageio or a direct `ffmpeg` subprocess for the mp4 itself). **This file didn't used to be
+checked in** -- it only ever existed directly on a GPU box, so `--video` was silently
+unreproducible from a fresh clone; reconstructed 2026-10-01 from the exact call signature the
+scripts here already use, verified with real rendered preview frames (both PERMIT/green and
+BLOCK/red cases) before committing, not just "it imports."
 
 **A real camera-framing bug, found and fixed 2026-09-28 (Kaoru caught it: "I can't even see the
 block").** The first rendered clip's camera (`eye=(0.35,-0.75,1.35)`) sat on the *opposite* side of
