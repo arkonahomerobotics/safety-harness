@@ -82,6 +82,21 @@ def _is_real_number(value) -> bool:
 
 
 def _distance(a, b) -> float:
+    """Euclidean distance between two equal-length coordinate tuples.
+
+    Every caller here passes two 3D points, but ``Pose.position``'s type hint is never runtime-
+    enforced, so a malformed adapter output (or a hand-built test fixture) could hand this a 2- or
+    4-tuple. Unlike the joint-limit checks' identical flaw (fixed earlier, see
+    ``joint_position_limits_respected``/``joint_velocity_within_limits``), a length mismatch here
+    doesn't silently skip a check -- ``zip()`` truncates to the shorter sequence and still returns a
+    *number*, just the distance between the wrong coordinates, which is worse: a confidently wrong
+    answer with nothing to flag it as such. Found by an independent third-party review, 2026-09-29.
+    Failing closed here means raising, not returning a bad distance -- every caller is a precondition
+    check reached through ActuatorGate.gate(), which already treats any exception from a check as a
+    normal, safely logged BLOCK (see PerceptionFailure's docstring and
+    test_fuzz.PathologicalInputTests.test_buggy_custom_check_that_raises_still_blocks_not_crashes)."""
+    if len(a) != len(b):
+        raise ValueError(f"_distance expects equal-length points, got {len(a)} and {len(b)}")
     return math.sqrt(sum((ai - bi) ** 2 for ai, bi in zip(a, b)))
 
 
