@@ -8,6 +8,7 @@ from .audit_log import (
     verify_log,
 )
 from .engine import ActuatorGate, PerceptionFailure
+from .heartbeat import HeartbeatEmitter, HeartbeatSink
 from .integrity import ConfigIntegrityError, UnverifiableError, seal_action, verify_action_seal, verify_decision_action
 from .schema import (
     SCHEMA_VERSION,
@@ -50,6 +51,8 @@ __all__ = [
     "ActuatorGate",
     "PerceptionFailure",
     "DecisionWatchdog",
+    "HeartbeatEmitter",
+    "HeartbeatSink",
     "ConfigIntegrityError",
     "UnverifiableError",
     "seal_action",
