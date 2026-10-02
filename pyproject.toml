@@ -25,6 +25,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 
+[project.scripts]
+safety-harness-conformance = "safety_harness.conformance.__main__:main"
+
 [project.urls]
 Homepage = "https://github.com/naganumakr/safety-harness"
 Repository = "https://github.com/naganumakr/safety-harness"

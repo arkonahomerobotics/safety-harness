@@ -94,6 +94,9 @@ evidence, not a certification.
   stacking task; the fix this extracts is what the closed-loop Franka measurement already validates).
 - `tests/` — unit tests, mutation/random-fuzz tests, and reflection-driven black-box contract
   tests.
+- `safety_harness/conformance/` — the installable, third-party-facing conformance fixture: run it
+  against your own adapter instances instead of cloning this repo and reading `tests/`. See
+  "Conformance fixture" below.
 
 Robot-specific behavior lives entirely behind four adapter interfaces
 (`PerceptionAdapter`, `DynamicsAdapter`, `FallbackController`, `Logger`) so the engine and checks
@@ -186,20 +189,77 @@ coordinated-disclosure policy: [SECURITY.md](SECURITY.md).
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The engine, the adapter
-interfaces, and the existing black-box/fuzz test suites are all open under this license: the goal
-is for any robot maker to implement the four adapters for their own stack and run the same tests
-against it, not to license the core code per-implementation. See the design doc's Release &
-Distribution section for the reasoning and the certification model this enables (aspirational —
-a real, separately-packaged third-party conformance fixture doesn't exist yet, see the Roadmap).
+interfaces, the existing black-box/fuzz test suites, and the installable conformance fixture
+(`safety_harness.conformance`) are all open under this license: the goal is for any robot maker to
+implement the four adapters for their own stack and run the same checks against it, not to license
+the core code per-implementation. See the design doc's Release & Distribution section for the
+reasoning and the certification model this enables (still aspirational — the fixture exists now,
+the certification *process and mark* built on top of it do not, see the Roadmap).
 
 ## Contributing an adapter
 
 1. Implement `PerceptionAdapter`, `DynamicsAdapter`, `FallbackController`, and `Logger` for your
    stack (see `safety_harness/adapters/isaac_lab.py` for the reference shape).
-2. Run the black-box and fuzz test suites against your adapter's `WorldState`/`PredictedTrajectory`
-   output — they're written against the interfaces, not the Isaac Lab implementation, so they
-   should run unmodified.
-3. Open an issue or PR with your results. Passing those tests is what "compliant adapter" means
-   here today — there's no separate conformance fixture, submission process, or certification mark
-   yet, just these adapter-generic tests; a real third-party-facing conformance process is intent,
-   not current state (see the design doc's Roadmap).
+2. Run `safety_harness.conformance.ConformanceSuite` (or the `safety-harness-conformance` CLI,
+   installed alongside the package) against your own `PerceptionAdapter`/`DynamicsAdapter`
+   *instances* and your own action schema — see "Conformance fixture" below. It's the real,
+   installable version of what used to just be "run `tests/test_blackbox.py` and
+   `tests/test_fuzz.py` yourself": those two files are still here, still adapter-interface-generic,
+   and still what this package's own CI runs against the reference adapters, but nothing under
+   `tests/` ships in the wheel (`[tool.setuptools.packages.find]` only includes `safety_harness*`)
+   and both assume you've read this repo's fixture conventions. `safety_harness.conformance` wraps
+   the same techniques into something you run against your own code without cloning this repo.
+3. Open an issue or PR with your `ConformanceReport`. A clean report (`report.ok`) is what
+   "compliant adapter" means here today — there's still no submission process or certification
+   mark (see the design doc's Roadmap and Commercialization section for where that's headed).
+
+## Conformance fixture
+
+```bash
+pip install safety-harness
+safety-harness-conformance \
+    --perception mystack.adapters:build_perception_adapter \
+    --dynamics mystack.adapters:build_dynamics_adapter \
+    --schema myconfig/action_schema.yaml \
+    --baseline-action '{"action_type": "grasp", "params": {"object_id": "known_safe_cube"}}'
+```
+
+or from Python:
+
+```python
+from safety_harness.action_schema import ActionSchemaRegistry
+from safety_harness.conformance import ConformanceSuite
+from safety_harness.schema import Action
+
+suite = ConformanceSuite(
+    perception=my_perception_adapter,       # your own PerceptionAdapter instance
+    dynamics=my_dynamics_adapter,            # your own DynamicsAdapter instance
+    action_schema=ActionSchemaRegistry.from_yaml("myconfig/action_schema.yaml"),
+    baseline_action=Action(action_type="grasp", params={"object_id": "known_safe_cube"}),
+)
+report = suite.run()
+print(report.summary())
+assert report.ok
+```
+
+Three stages, each catching a different class of problem (see `safety_harness/conformance/`'s own
+module docstrings for the full reasoning):
+
+- **Structural conformance** — does your adapter's own `WorldState`/`PredictedTrajectory` actually
+  satisfy the schema (right types, finite numbers, confidences in `[0, 1]`)? Catches the class of
+  bug the design doc's "NaN-Sensor Stress Test" describes: a structurally-wrong value that defeats a
+  downstream check without ever raising an exception.
+- **Contract fuzz** — the same adapter-interface-generic properties `tests/test_blackbox.py` checks
+  (never an undocumented exception, an unrecognized action type never permits, `PERMIT` returns the
+  original action, `BLOCK` always returns some action), run against your adapter's *real* output
+  instead of a synthetic one.
+- **Mutation battery** *(needs `baseline_action`)* — the same curated single-field-mutation battery
+  `tests/test_fuzz.py` runs against a hand-built golden fixture, run instead against one real
+  snapshot from your adapter. If your `baseline_action` doesn't currently `PERMIT`, this stage is
+  skipped (not failed) and the report tells you which checks blocked it — that's expected for an
+  adapter still being wired up, not a fixture bug.
+
+`ConformanceReport.to_dict()` is JSON-serializable; `report.summary()` is the human-readable form the
+CLI prints. Neither stage runs your actual robot's fallback or logger — those default to the
+harness's own `FreezeInPlaceFallback`/`InMemoryLogger`, since this fixture is about
+perception/dynamics conformance, not your integration's fallback behavior.
