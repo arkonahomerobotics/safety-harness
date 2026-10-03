@@ -34,3 +34,14 @@ for _id in ("Isaac-Stack-Blocks-G1-RL-v0", "Isaac-Stack-Blocks-G1-RL-RC-v0"):
     gym.spec(_id).kwargs["rsl_rl_bc_cfg_entry_point"] = (
         f"{agents.__name__}.rsl_rl_ppo_cfg_g1_block:G1BlockStackBCPPORunnerCfg"
     )
+
+# -- Stage 2: place block C on the already-stacked A-on-B pair (chained after a Stage-1 checkpoint) --
+gym.register(
+    id="Isaac-Stack-Blocks-G1-RL-Stage2-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.g1_block_stack_3stage2_rl_env_cfg:G1BlockStack3Stage2EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg_g1_block:G1BlockStackPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
