@@ -76,6 +76,11 @@ PR.
     observation/action space), `bc_train_franka.py` (clones those demonstrations into an `rsl_rl`
     checkpoint `train.py --checkpoint` can warm-start PPO from), `diag_bc_franka.py` (compares a
     policy's rollout against a shadow scripted expert, phase by phase).
+  - **`accept_20.py`** (also new): the acceptance gate to run once a chained stage-1/stage-2
+    checkpoint pair looks good on `eval_chain.py`'s aggregate numbers — 20 sequential, single-env,
+    seeded, deterministic episodes judged on the env's own chained-success definition, with optional
+    per-episode captioned video. See `ACCEPTANCE.md` for the full protocol and why it's careful about
+    exactly when it's safe to read simulation state relative to Isaac Lab's own auto-reset.
 
 ## Port changes (Isaac Lab 3.0 / rsl-rl-lib 5.5.1)
 
