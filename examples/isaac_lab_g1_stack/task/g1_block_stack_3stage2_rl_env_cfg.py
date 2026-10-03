@@ -135,3 +135,37 @@ class G1BlockStack3Stage2EnvCfg(FixedBaseUpperBodyIKG1EnvCfg):
             mode="reset",
             params={"pose_range": {"x": (-0.02, 0.02), "y": (-0.02, 0.02)}, "velocity_range": {}, "asset_cfg": SceneEntityCfg("block_c")},
         )
+
+
+EXPERT_SNAPSHOT_PATH = "/workspace/isaaclab/g1_stage2_expert_snapshots.pt"  # stack_expert_rl_stage2.py --snapshots
+HANDOFF_SNAPSHOT_PATH = "/workspace/isaaclab/g1_stage1_handoff_snapshots.pt"  # capture_stage1_handoff.py
+
+
+@configclass
+class G1BlockStack3Stage2ReverseCurriculumEnvCfg(G1BlockStack3Stage2EnvCfg):
+    """Phase 2 + reverse curriculum: the real training distribution. Same reasoning as Stage 1's
+    own reverse curriculum (the technique that unstuck the Franka/G1 stacking policies) but now
+    mixing two different kinds of "mid-task" start: real Stage-1 handoff states (a genuine
+    model_5797 2-block success, A really seated on B, hand clear) and expert mid-carry-of-C states
+    (already holding C, approaching the tower). A single event (rl_events_g1.reset_stage2_mixed_snapshots)
+    draws ONE bucket per env -- handoff / expert / plain default -- rather than two independent
+    reset_from_snapshots calls, which would let ~(handoff_prob*expert_prob) of envs get both, the
+    second overwriting the first's robot joints (see that function's own docstring for exactly what
+    breaks). Defined last so it overrides whatever the ordinary per-block reset events above
+    already produced, for the envs it picks."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        from isaaclab_tasks.contrib.locomanip_pick_place.mdp import rl_events_g1 as rl_events
+
+        self.events.reset_stage2_mixed_snapshots = EventTerm(
+            func=rl_events.reset_stage2_mixed_snapshots,
+            mode="reset",
+            params={
+                "handoff_snapshot_path": HANDOFF_SNAPSHOT_PATH,
+                "expert_snapshot_path": EXPERT_SNAPSHOT_PATH,
+                "handoff_prob": 0.5,
+                "expert_prob": 0.35,
+                # remaining 0.15 of envs keep the plain default reset (A pre-seated on B, C random on table)
+            },
+        )
