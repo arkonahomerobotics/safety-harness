@@ -632,21 +632,21 @@ class FrankaCubeStackRLMilestoneFullEnvCfg(FrankaCubeStackRLMilestoneFullSnapEnv
 @configclass
 class MilestonePotentialRewardsCfg:
     stack = RewTerm(
-        func=robosuite_rewards.milestone_stack_reward, weight=1.0, params={"mode": "stage1", "potential_scale": 1.0}
+        func=robosuite_rewards.milestone_stack_reward, weight=1.0, params={"mode": "stage1", "potential_scale": 10.0}
     )
 
 
 @configclass
 class MilestonePotentialStage2RewardsCfg:
     stack = RewTerm(
-        func=robosuite_rewards.milestone_stack_reward, weight=1.0, params={"mode": "stage2", "potential_scale": 1.0}
+        func=robosuite_rewards.milestone_stack_reward, weight=1.0, params={"mode": "stage2", "potential_scale": 10.0}
     )
 
 
 @configclass
 class MilestonePotentialFullRewardsCfg:
     stack = RewTerm(
-        func=robosuite_rewards.milestone_stack_reward, weight=1.0, params={"mode": "full", "potential_scale": 1.0}
+        func=robosuite_rewards.milestone_stack_reward, weight=1.0, params={"mode": "full", "potential_scale": 10.0}
     )
 
 

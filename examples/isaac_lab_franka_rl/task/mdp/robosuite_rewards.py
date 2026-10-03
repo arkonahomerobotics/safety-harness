@@ -285,7 +285,7 @@ class milestone_stack_reward(ManagerTermBase):
         self._complete_ever[env_ids] = False
         self._complete_now[env_ids] = False
 
-    def _level(self, env, upper, lower, contact_sensor, finger_sensors, lift_z, over_xy, thr, reach_dist, rest_z=0.0203):
+    def _level(self, env, upper, lower, contact_sensor, finger_sensors, lift_z, over_xy, thr, reach_dist, rest_z=0.0203, reach_kernel=0.4, over_kernel=0.2):
         up = env.scene[upper].data.root_pos_w.torch
         ee = env.scene["ee_frame"].data.target_pos_w.torch[:, 0, :]
         reach = torch.linalg.norm(ee - up, dim=1) < reach_dist
@@ -302,10 +302,10 @@ class milestone_stack_reward(ManagerTermBase):
         # bounded potential in [0, 1]: nearness of gripper to cube, grasp, grasped height, grasped nearness to target
         zrel = (up[:, 2] - env.scene.env_origins[:, 2] - rest_z).clamp(0.0, 0.1) / 0.1
         phi = (
-            0.2 * (1.0 - torch.tanh(torch.linalg.norm(ee - up, dim=1) / 0.1))
+            0.2 * (1.0 - torch.tanh(torch.linalg.norm(ee - up, dim=1) / reach_kernel))
             + 0.2 * grasp.float()
             + 0.3 * grasp.float() * zrel
-            + 0.3 * lift.float() * (1.0 - torch.tanh(torch.linalg.norm(up[:, :2] - lo[:, :2], dim=1) / 0.1))
+            + 0.3 * lift.float() * (1.0 - torch.tanh(torch.linalg.norm(up[:, :2] - lo[:, :2], dim=1) / over_kernel))
         )
         return torch.stack((reach, grasp, lift, over, placed), dim=1), phi
 
