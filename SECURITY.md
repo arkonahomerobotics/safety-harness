@@ -31,7 +31,7 @@ next to an under-tracked agent) report `satisfied=True` on corrupted input. It w
 `preconditions.py`, validated three separate ways (the full test suite locally, the same checkout
 against a remote GPU box's own Python, and five live fault-injection scenarios in a running Isaac
 Sim environment), documented in the open rather than glossed over, and released as
-[v0.2.2](https://github.com/naganumakr/safety-harness/releases/tag/v0.2.2) within the same
+[v0.2.2](https://github.com/arkonahomerobotics/safety-harness/releases/tag/v0.2.2) within the same
 development session it was found. That was an internally-found issue, not an external report, but
 it's real evidence of how this project actually handles a safety-relevant defect once one surfaces:
 seriously, fixed, tested harder than the original bug required, and disclosed openly in the design
@@ -68,7 +68,7 @@ existing practice of disclosing a gap it hasn't fixed yet rather than staying si
 Pre-1.0 (`Development Status :: 3 - Alpha`) and single-maintainer: only the **latest published
 release on PyPI** gets security fixes. There is no backport policy to older minor versions --
 upgrading is the fix. Check [PyPI](https://pypi.org/project/safety-harness/) or the
-[releases page](https://github.com/naganumakr/safety-harness/releases) for the current version.
+[releases page](https://github.com/arkonahomerobotics/safety-harness/releases) for the current version.
 
 ## Coordinated disclosure
 

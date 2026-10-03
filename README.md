@@ -1,6 +1,6 @@
 # Safety Harness for Physical AI
 
-[![tests](https://github.com/naganumakr/safety-harness/actions/workflows/tests.yml/badge.svg)](https://github.com/naganumakr/safety-harness/actions/workflows/tests.yml)
+[![tests](https://github.com/arkonahomerobotics/safety-harness/actions/workflows/tests.yml/badge.svg)](https://github.com/arkonahomerobotics/safety-harness/actions/workflows/tests.yml)
 [![PyPI](https://img.shields.io/pypi/v/safety-harness.svg)](https://pypi.org/project/safety-harness/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
@@ -124,13 +124,13 @@ pip install safety-harness
 Or straight from GitHub (e.g. for an unreleased fix):
 
 ```bash
-pip install git+https://github.com/naganumakr/safety-harness.git
+pip install git+https://github.com/arkonahomerobotics/safety-harness.git
 ```
 
 Or for local development (editable, so edits to `safety_harness/` take effect immediately):
 
 ```bash
-git clone https://github.com/naganumakr/safety-harness.git
+git clone https://github.com/arkonahomerobotics/safety-harness.git
 cd safety-harness
 pip install -e .
 python -m unittest discover -s tests -p "test_*.py"
@@ -146,7 +146,7 @@ written and digest-pinned for your own robot's real checks, the same way `config
 and `configs/turtlebot3_action_schema.yaml` are each specific to their own robot rather than shared.
 `configs/example_action_schema.yaml` below is the reference shape to copy from — either clone this
 repo, or fetch just that file and its `.sha256` from
-[`configs/` on GitHub](https://github.com/naganumakr/safety-harness/tree/main/configs).
+[`configs/` on GitHub](https://github.com/arkonahomerobotics/safety-harness/tree/main/configs).
 
 ```python
 from safety_harness import ActionSchemaRegistry, ActuatorGate, DecisionWatchdog
