@@ -2,7 +2,8 @@
 that ``train.py --checkpoint`` loads as a warm start (the final policy is still trained by PPO).
 
 Data: collect_bc_franka.py output(s) -- (RL-task policy obs [94], clean expert action in the RL task's action space
-[7]), DART-noised execution, successful episodes only.
+[7]). Expert-driven demos: DART-noised execution, successful episodes only. DAgger rounds: the BC policy drives,
+the expert labels every visited state.
 
 Network = exactly the PPO actor of StackCubePPORunnerCfg: EmpiricalNormalization (rsl_rl's formula,
 (x - mean) / (sqrt(var) + 1e-2)) -> MLP [256, 128, 64] ELU -> 7 action means. The checkpoint skeleton is a FRESH
@@ -22,7 +23,7 @@ import torch
 import torch.nn as nn
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--data", required=True, help="glob of collect_bc_franka.py outputs")
+parser.add_argument("--data", required=True, help="comma-separated globs of collect_bc_franka.py outputs")
 parser.add_argument("--template", required=True, help="fresh iteration-0 checkpoint of the target agent cfg")
 parser.add_argument("--out", required=True)
 parser.add_argument("--epochs", type=int, default=40)
@@ -33,6 +34,7 @@ parser.add_argument("--std_grip", type=float, default=0.3)
 parser.add_argument("--grip_weight", type=float, default=2.0)
 parser.add_argument("--shuffle_last_action", type=float, default=1.0,
                     help="probability of replacing the last-action obs dims (0..6) with another sample's during training")
+parser.add_argument("--drop_regrasp", action="store_true", help="drop re-grasp-from-the-stack labels (see below)")
 parser.add_argument("--device", default="cpu")
 parser.add_argument("--threads", type=int, default=6)
 parser.add_argument("--seed", type=int, default=0)
@@ -41,7 +43,8 @@ torch.manual_seed(args.seed)
 torch.set_num_threads(args.threads)
 dev = args.device
 
-files = sorted(glob.glob(args.data))
+files = sorted({f for pat in args.data.split(",") for f in glob.glob(pat)})
+assert files, f"no data files match {args.data}"
 O = torch.cat([torch.load(f, weights_only=False)["obs"] for f in files]).float()
 A = torch.cat([torch.load(f, weights_only=False)["act"] for f in files]).float()
 print(f"{len(files)} files, {O.shape[0]} pairs, obs {O.shape[1]}, act {A.shape[1]}")
@@ -56,6 +59,19 @@ lin_keys = sorted({k.rsplit(".", 1)[0] for k in actor if k.startswith("mlp.") an
 shapes = [tuple(actor[f"{k}.weight"].shape) for k in lin_keys]
 print("template actor MLP:", list(zip(lin_keys, shapes)))
 assert shapes[0][1] == O.shape[1] and shapes[-1][0] == A.shape[1], "template does not match data dims"
+
+if args.drop_regrasp:
+    # DAgger rounds 1-2 were labelled before bc_expert.Expert.seated_override existed: after the POLICY had placed
+    # and released the cube, the shadow expert went back to "above"/"descend"/"grasp" on the stacked cube. Drop
+    # those labels (cube seated on its destination, fingers open, label = close or move down). Obs layout: cube
+    # positions at 64:73 (obs cube_1 = destination, cube_2 = picked cube, in both stages thanks to the stage-2
+    # role rebinding), finger joint_pos_rel at 14:16 (+0.04 = absolute).
+    dst, obj = O[:, 64:67], O[:, 67:70]
+    seat = ((obj[:, 2] - dst[:, 2] - 0.0468).abs() < 0.006) & (torch.linalg.norm(obj[:, :2] - dst[:, :2], dim=1) < 0.015)
+    opened = O[:, 14:16].mean(1) + 0.04 > 0.035
+    bad = seat & opened & ((A[:, 6] < 0) | (A[:, 2] < -0.1))
+    print(f"drop_regrasp: dropping {int(bad.sum())} of {len(O)} pairs")
+    O, A = O[~bad], A[~bad]
 
 LAST_ACT = A.shape[1]  # policy obs starts with mdp.last_action (the ObservationsCfg.PolicyCfg term order)
 lag = (O[1:, :3] - A[:-1, :3]).abs().mean()
