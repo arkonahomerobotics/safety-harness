@@ -74,6 +74,13 @@ class RewardsCfg:
     action_rate = RewTerm(func=action_rate_l2, weight=-1e-4)
     joint_vel = RewTerm(func=joint_vel_l2, weight=-1e-4, params={"asset_cfg": SceneEntityCfg("robot")})
     grip_smoothness = RewTerm(func=grip_action_rate_l2, weight=-1e-2)
+    # Added 2026-10-03 (KAN-36): Run H/I's episode length shrank toward ~20 steps with block_a_off_b
+    # at ~99% -- a reward-by-termination diagnostic found no per-step penalty was large enough to
+    # explain it; the real driver was REWARD RATE, since the achievement budget above is one-time
+    # and farmable again every fresh episode, and block_a_off_b (no penalty before this) was cheap
+    # to trigger. These two terms close that gap -- see each one's own docstring for the reasoning.
+    block_a_off_b_penalty = RewTerm(func=rl_rewards_g1_stage2.block_a_off_b_penalty, weight=1.0)
+    tower_intact_reward = RewTerm(func=rl_rewards_g1_stage2.tower_intact_reward, weight=1.0)
 
 
 @configclass

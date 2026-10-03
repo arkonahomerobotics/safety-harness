@@ -227,3 +227,65 @@ def block_a_off_b(
     b_z = block_b.data.root_pos_w.torch[:, 2]
     off = (a_z - b_z) < (place_height - margin)
     return off & (env.episode_length_buf >= grace_steps)
+
+
+def block_a_off_b_penalty(
+    env: ManagerBasedRLEnv,
+    block_a_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    block_b_cfg: SceneEntityCfg = SceneEntityCfg("block_b"),
+    place_height: float = 0.045,
+    margin: float = 0.02,
+    grace_steps: int = 5,
+    penalty: float = -6.0,
+) -> torch.Tensor:
+    """One-time penalty the exact step block_a_off_b's own condition fires (same geometry check,
+    duplicated rather than read off the termination manager since reward and termination are
+    computed from the same pre-reset state within one step() call either way -- this just avoids
+    an inter-manager read-order dependency).
+
+    Sized to exceed staged_achievements_3stack's full CAPPED pre-success achievement budget
+    (max_reach_reward 0.5 + grasp_reward 1.0 + lift_reward 1.0 + max_align_reward 1.0 +
+    release_aligned_reward 1.0 = 4.5, all one-time/capped, farmable again every fresh episode) at
+    -6.0, so "knock the tower over and reset to re-farm" is strictly worse than any outcome that
+    keeps A on B -- diagnosed 2026-10-03 (KAN-36): a reward-by-termination breakdown on a declined
+    checkpoint found NO per-step penalty term was actually large enough to matter (action_rate/
+    joint_vel/grip_smoothness summed to ~-0.002/episode); the real driver was REWARD RATE -- 20-step
+    block_a_off_b episodes averaged ~13x the per-step reward of a 500-step stalled-but-alive one,
+    because the achievement budget resets on every episode and was otherwise free to re-claim."""
+    block_a: RigidObject = env.scene[block_a_cfg.name]
+    block_b: RigidObject = env.scene[block_b_cfg.name]
+    a_z = block_a.data.root_pos_w.torch[:, 2]
+    b_z = block_b.data.root_pos_w.torch[:, 2]
+    off = (a_z - b_z) < (place_height - margin)
+    fired = off & (env.episode_length_buf >= grace_steps)
+    return torch.where(fired, torch.full_like(a_z, penalty), torch.zeros_like(a_z))
+
+
+def tower_intact_reward(
+    env: ManagerBasedRLEnv,
+    block_a_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    block_b_cfg: SceneEntityCfg = SceneEntityCfg("block_b"),
+    place_height: float = 0.045,
+    stack_xy_tol: float = 0.025,
+    stack_z_tol: float = 0.012,
+    base_rest_z_tol: float = 0.01,
+    reward: float = 0.01,
+) -> torch.Tensor:
+    """Small per-step reward while the A-on-B base is intact -- A seated on B's live pose, B still
+    on the table -- independent of block C's state, so there's a live incentive not to knock the
+    base loose even while still failing to place C. Deliberately 5x smaller than
+    staged_achievements_3stack's own hold_reward (0.05/step for the full 3-stack standing), so
+    actually placing C stays clearly more valuable than just not breaking what's already there."""
+    block_a: RigidObject = env.scene[block_a_cfg.name]
+    block_b: RigidObject = env.scene[block_b_cfg.name]
+    o = env.scene.env_origins
+    pa = block_a.data.root_pos_w.torch - o
+    pb = block_b.data.root_pos_w.torch - o
+    b_rest_z = env.cfg.scene.block_b.init_state.pos[2]
+    b_on_table = (pb[:, 2] - b_rest_z).abs() < base_rest_z_tol
+    a_seat = pb.clone()
+    a_seat[:, 2] += place_height
+    a_off = pa - a_seat
+    a_on_b = (torch.linalg.norm(a_off[:, :2], dim=1) < stack_xy_tol) & (a_off[:, 2].abs() < stack_z_tol)
+    intact = b_on_table & a_on_b
+    return intact.float() * reward
