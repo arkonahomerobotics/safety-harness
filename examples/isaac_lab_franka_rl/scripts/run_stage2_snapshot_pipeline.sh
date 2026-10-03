@@ -28,6 +28,7 @@ set -uo pipefail
 STAGE1_CHECKPOINT=""
 NUM_ENVS=1024
 HANDOFF_ROUNDS=6
+HANDOFF_STEPS=300
 HANDOFF_NUM_ENVS=4096
 MIN_RAM_GB=8
 MIN_GPU_FREE_GB=4
@@ -37,12 +38,13 @@ LOG_DIR="/workspace/isaaclab/logs/stage2_snapshot_pipeline/$(date +%Y%m%d_%H%M%S
 
 usage() {
     cat <<USAGE
-Usage: $0 --stage1 <checkpoint>.pt [--num_envs N] [--handoff_rounds N] [--handoff_num_envs N]
+Usage: $0 --stage1 <checkpoint>.pt [--num_envs N] [--handoff_rounds N] [--handoff_steps N] [--handoff_num_envs N]
           [--snapshot_dir DIR] [--log_dir DIR] [--min_ram_gb N] [--min_gpu_free_gb N] [-y|--yes]
 
 --stage1              Stage-1 checkpoint to capture handoff states from (required).
 --num_envs            Envs for the expert-snapshot captures (default: $NUM_ENVS, Brev scale).
 --handoff_rounds      Rounds for capture_handoff.py (default: $HANDOFF_ROUNDS, the K7 recipe).
+--handoff_steps       Steps per round (default: $HANDOFF_STEPS; must exceed the stage-1 policy handoff time, ~190 for BC stage 1).
 --handoff_num_envs    Envs for capture_handoff.py (default: $HANDOFF_NUM_ENVS).
 --snapshot_dir        Where snapshot .pt files live (default: $SNAPSHOT_DIR).
 --log_dir             Where per-step logs are written (default: timestamped under
@@ -58,6 +60,7 @@ while [[ $# -gt 0 ]]; do
         --stage1) STAGE1_CHECKPOINT="$2"; shift 2 ;;
         --num_envs) NUM_ENVS="$2"; shift 2 ;;
         --handoff_rounds) HANDOFF_ROUNDS="$2"; shift 2 ;;
+        --handoff_steps) HANDOFF_STEPS="$2"; shift 2 ;;
         --handoff_num_envs) HANDOFF_NUM_ENVS="$2"; shift 2 ;;
         --snapshot_dir) SNAPSHOT_DIR="$2"; shift 2 ;;
         --log_dir) LOG_DIR="$2"; shift 2 ;;
@@ -203,7 +206,7 @@ fi
 if ! skip_if_exists "$HANDOFF" "stage-1 handoff capture"; then
     run_step "handoff capture (capture_handoff.py, $HANDOFF_ROUNDS rounds)" "$LOG_DIR/06_handoff.log" \
         ./isaaclab.sh -p franka_rl/capture_handoff.py --stage1 "$STAGE1_CHECKPOINT" --out "$HANDOFF" \
-            --num_envs "$HANDOFF_NUM_ENVS" --rounds "$HANDOFF_ROUNDS"
+            --num_envs "$HANDOFF_NUM_ENVS" --rounds "$HANDOFF_ROUNDS" --steps "$HANDOFF_STEPS"
 fi
 
 # 7. K7 recipe: handoff x10 + the step-5 output
