@@ -29,11 +29,11 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils.configclass import configclass
 
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.fixed_base_upper_body_ik_g1_env_cfg import (
+from isaaclab_tasks.contrib.locomanip_pick_place.fixed_base_upper_body_ik_g1_env_cfg import (
     FixedBaseUpperBodyIKG1EnvCfg,
 )
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp import rl_obs_g1, rl_rewards_g1
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.rl_actions_g1 import G1GripActionCfg
+from isaaclab_tasks.contrib.locomanip_pick_place.mdp import rl_obs_g1, rl_rewards_g1
+from isaaclab_tasks.contrib.locomanip_pick_place.mdp.rl_actions_g1 import G1GripActionCfg
 
 BLOCK = 0.045
 A_POS = (-0.26, 0.36, 0.72)
@@ -148,6 +148,8 @@ class G1BlockStackRLEnvCfg(FixedBaseUpperBodyIKG1EnvCfg):
     def __post_init__(self):
         # Deliberately not calling the base __post_init__: all it adds beyond these timing settings is
         # the Pink IK URDF path and the XR teleop pipeline, neither of which this task uses.
+        self.scene.left_hand_contact = None
+        self.scene.right_hand_contact = None  # only feed the XR haptic pipeline this task skips; also has a stale asset-path regex
         self.decimation = 4
         self.sim.dt = 1 / 200  # 200Hz physics, 50Hz control -- same as the base task
         self.sim.render_interval = 2
@@ -184,7 +186,7 @@ class G1BlockStackRLReverseCurriculumEnvCfg(G1BlockStackRLEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp import rl_events_g1 as rl_events
+        from isaaclab_tasks.contrib.locomanip_pick_place.mdp import rl_events_g1 as rl_events
 
         # defined last, so it overrides the block randomization for the envs it picks
         self.events.reset_from_snapshots = EventTerm(
