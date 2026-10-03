@@ -61,6 +61,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--action_horizon", type=int, default=8)
     parser.add_argument("--out", type=str, default="/workspace/isaaclab/franka_gr00t_rollout.mp4")
     parser.add_argument("--render_sweep", action="store_true", help="measure camera noise under RTX settings and exit")
+    parser.add_argument("--rtx", type=str, default="", help="extra RTX global settings, e.g. enable_reflections=1,enable_shadows=1")
+    parser.add_argument("--probe", type=str, default="", help="save the first table_cam frame to this path, print stats, exit")
+    parser.add_argument("--light_intensity", type=float, default=None, help="override the dome light's default intensity (3000)")
+    parser.add_argument("--friction", type=float, default=None, help="explicit static/dynamic friction on fingers and cubes")
+    parser.add_argument("--record_dir", type=str, default="", help="save each successful episode's policy obs/actions as .npz")
+    parser.add_argument("--env_seed", type=int, default=None, help="env seed (cube layouts); vary across collection batches")
+    parser.add_argument("--no_video", action="store_true", help="skip demo_cam mp4 writing (faster data collection)")
     add_launcher_args(parser)
     parser.set_defaults(device=None)
     args_cli, hydra_args = setup_preset_cli(parser)
@@ -68,7 +75,20 @@ def _parse_args() -> argparse.Namespace:
     return args_cli
 
 
-def build_env_cfg(task: str, num_envs: int):
+def _parse_rtx(spec: str) -> dict:
+    out = {}
+    for item in filter(None, spec.split(",")):
+        key, val = item.split("=")
+        try:
+            out[key] = int(val) if val.lstrip("-").isdigit() else float(val)
+        except ValueError:
+            out[key] = val
+        if key.startswith("enable_"):
+            out[key] = bool(out[key])
+    return out
+
+
+def build_env_cfg(task: str, num_envs: int, rtx: dict | None = None):
     env_cfg, _ = resolve_task_config(task, "")
     env_cfg.scene.num_envs = num_envs
 
@@ -122,6 +142,9 @@ def build_env_cfg(task: str, num_envs: int):
     else:
         # Base visuomotor cfg already sets DLAA on table_cam/wrist_cam; match it on demo_cam.
         set_isaac_rtx_global_settings(env_cfg.scene.demo_cam.renderer_cfg, antialiasing_mode="DLAA")
+    if rtx:
+        for cam_name in ("table_cam", "wrist_cam", "demo_cam"):
+            set_isaac_rtx_global_settings(getattr(env_cfg.scene, cam_name).renderer_cfg, **rtx)
 
     return env_cfg
 
@@ -229,7 +252,28 @@ def decode_action_chunk(chunk: dict, t: int, device, step: int) -> torch.Tensor:
 
 def main() -> None:
     args_cli = _parse_args()
-    env_cfg = build_env_cfg(args_cli.task, num_envs=1)
+    env_cfg = build_env_cfg(args_cli.task, num_envs=1, rtx=_parse_rtx(args_cli.rtx))
+    if args_cli.light_intensity is not None:
+        env_cfg.events.randomize_light.params["default_intensity"] = args_cli.light_intensity
+    if args_cli.friction is not None:
+        # Grasp friction is otherwise whatever the Isaac 6.2 USD assets author; pin it explicitly.
+        from isaaclab.envs import mdp as base_mdp
+        from isaaclab.managers import EventTermCfg, SceneEntityCfg
+
+        mu = args_cli.friction
+        targets = {"robot": SceneEntityCfg("robot", body_names="panda_.*finger"),
+                   "cube_1": SceneEntityCfg("cube_1"), "cube_2": SceneEntityCfg("cube_2"), "cube_3": SceneEntityCfg("cube_3")}
+        for name, asset_cfg in targets.items():
+            setattr(env_cfg.events, f"pin_friction_{name}", EventTermCfg(
+                func=base_mdp.randomize_rigid_body_material,
+                mode="startup",
+                params={"asset_cfg": asset_cfg, "static_friction_range": (mu, mu), "dynamic_friction_range": (mu, mu),
+                        "restitution_range": (0.0, 0.0), "num_buckets": 1},
+            ))
+
+    if args_cli.env_seed is not None:
+        env_cfg.seed = args_cli.env_seed
+    print(f"[INFO]: env seed = {env_cfg.seed}", flush=True)
 
     try:
         validate(env_cfg)
@@ -240,6 +284,15 @@ def main() -> None:
         env = gym.make(args_cli.task, cfg=env_cfg)
         if args_cli.render_sweep:
             _render_sweep(env)
+            return
+        if args_cli.probe:
+            from PIL import Image
+
+            env.reset()
+            noise, mean = _table_cam_noise(env)
+            obs = env.unwrapped.observation_manager.compute()["policy"]
+            Image.fromarray(obs["table_cam"][0].to(torch.uint8).cpu().numpy()).save(args_cli.probe)
+            print(f"[PROBE] rtx={args_cli.rtx!r} noise={noise:.2f} table_mean={mean} (orig 1.72, [78.7, 87.3, 79.0])")
             return
         cleanup.callback(env.close)
 
@@ -261,6 +314,8 @@ def main() -> None:
             # slowdown in an earlier batch run, not model/server latency (confirmed via
             # per-call timing: ~0.14s/call, negligible).
             frames: list[np.ndarray] = []
+            episode: dict[str, list] = {k: [] for k in ("table_cam", "wrist_cam", "single_arm", "gripper",
+                                                         "action_single_arm", "action_gripper")}
             obs, _ = env.reset()
             policy_obs = {k: v for k, v in obs["policy"].items()}
             success = False
@@ -281,14 +336,24 @@ def main() -> None:
                     if steps >= args_cli.max_steps:
                         break
                     action = decode_action_chunk(action_chunk, t, env.unwrapped.device, steps)
+                    if args_cli.record_dir:
+                        # Pair the observation the env was in *before* this action with the action taken.
+                        step_input = model_input if t == 0 else obs_to_policy_input(policy_obs)
+                        episode["table_cam"].append(step_input["video"]["table_cam"][0, 0])
+                        episode["wrist_cam"].append(step_input["video"]["wrist_cam"][0, 0])
+                        episode["single_arm"].append(step_input["state"]["single_arm"][0, 0])
+                        episode["gripper"].append(step_input["state"]["gripper"][0, 0])
+                        act = action[0].cpu().numpy()
+                        episode["action_single_arm"].append(act[:6])
+                        episode["action_gripper"].append(act[6:])
                     with torch.inference_mode():
                         obs, _reward, terminated, truncated, info = env.step(action)
                     policy_obs = {k: v for k, v in obs["policy"].items()}
                     steps += 1
 
-                    demo_cam = env.unwrapped.scene.sensors["demo_cam"]
-                    frame = demo_cam.data.output["rgb"][0].to(torch.uint8).cpu().numpy()
-                    frames.append(frame)
+                    if not args_cli.no_video:
+                        demo_cam = env.unwrapped.scene.sensors["demo_cam"]
+                        frames.append(demo_cam.data.output["rgb"][0].to(torch.uint8).cpu().numpy())
 
                     term_mgr = env.unwrapped.termination_manager
                     if "success" in term_mgr.active_terms and term_mgr.get_term("success")[0]:
@@ -302,6 +367,13 @@ def main() -> None:
 
             print(f"[RESULT] rollout {rollout_idx}: steps={steps} success={success}")
             results.append((rollout_idx, steps, success))
+
+            if args_cli.record_dir and success:
+                os.makedirs(args_cli.record_dir, exist_ok=True)
+                ep_path = os.path.join(args_cli.record_dir, f"seed{env_cfg.seed}_ep{rollout_idx:03d}_{steps}steps.npz")
+                np.savez_compressed(ep_path, task=LANG_INSTRUCTION, **{k: np.stack(v) for k, v in episode.items()})
+                print(f"[RECORD] saved {ep_path}", flush=True)
+            del episode
 
             if frames:
                 import imageio.v2 as imageio

@@ -74,11 +74,86 @@ variant instead — see the file's own module docstring and the `TASK`/`COSMOS_T
 why these are not interchangeable (different lighting/render pipeline, confirmed to matter: the
 original 10/10 baseline is on the base task specifically).
 
-## Status, 2026-10-03
+## Debugging CLI flags (added 2026-10-03)
 
-Re-running the base Mimic task to confirm 10/10 still reproduces on this (different) IsaacLab
-checkout is in progress — the Cosmos variant was getting 6/10, with failures traced to slow or
-toppled third-cube placement (the task's own success criterion is a 3-cube tower, all three
-stacked, not 2) rather than grasp failures. If that turns out to be a Cosmos-render
-distribution-shift issue specifically, this README will be updated with the result once the
-retest finishes.
+`franka_gr00t_closed_loop.py` grew several flags while chasing the gap below — all real, all
+exercised, none hypothetical:
+
+- `--action_horizon N` (default 8): how many of the predicted 16-step action chunk to execute
+  before re-querying the server. 8 is NVIDIA's own convention everywhere in this repo
+  (`gr00t/eval/rollout_policy.py`, `examples/rebot-arm-dm/eval_rebot_arm_dm.py` — both default to
+  8), not a deviation worth chasing on its own.
+- `--rtx key=val,...` — extra `set_isaac_rtx_global_settings` overrides (e.g.
+  `enable_reflections=1,enable_shadows=1,enable_global_illumination=1`), `--light_intensity` —
+  override the dome light's default 3000 intensity, `--friction` — explicit static/dynamic
+  friction on the gripper fingers and cubes (neither is set anywhere in this task's own Python
+  config by default — see "Franka grasp-physics audit" below).
+- `--probe path` — dump the first `table_cam` frame and exit, for a fast visual sanity check
+  without running a full rollout. `--render_sweep` — measure camera noise under different RTX
+  settings and exit.
+- `--record_dir dir`, `--env_seed N`, `--no_video` — self-imitation data collection: save each
+  successful episode's observations/actions as an `.npz` (schema in `scripts/selfimit/`'s own
+  docstrings), vary cube layouts across collection batches, skip the demo-cam mp4 for speed.
+
+## Franka grasp-physics audit (2026-10-03)
+
+Neither the gripper's friction nor the cubes' mass/friction are set anywhere in this task's own
+Python config (`isaaclab_assets/robots/franka.py`, `isaaclab_tasks/.../stack_env_cfg.py`) — both
+come entirely from the shared NVIDIA USD assets, identical regardless of which script drives the
+sim. `--friction` above exists to test that directly rather than guess at it.
+
+## Status, 2026-10-03 — Isaac Sim 6.1/6.2 does not reproduce the original 10/10
+
+Measured results, this checkout, same checkpoint (`checkpoint-5000`), against the baseline above:
+
+| Variant | Result | Notes |
+|---|---|---|
+| Original run (lost box) | **10/10** | 400-544 steps/rollout — the number everything else is measured against |
+| Cosmos env, defaults | 6/10 | first reproduction attempt |
+| Base Mimic env, defaults | 6/10 | ruling out "wrong task" as the sole cause — same shortfall on the task the baseline actually used |
+| Base Mimic, dome light 2200 (closer to original brightness) | 7/10 | real improvement, not a fix |
+| `--action_horizon 4` | 1/3 (stopped early) | worse, not better — 8 stays the default |
+| `--friction 1.0` | 9/10 and 7/10 (16/20 combined, two batches) | the best lever found so far, still short of 10/10 and not fully consistent batch-to-batch |
+| `--friction 2.0` | pending | running |
+
+**Plain statement of where this stands:** nothing tried so far — render settings, dome light
+intensity, action-chunk horizon, or gripper/cube friction — gets this checkout back to the
+original 10/10 on Isaac Sim 6.1/6.2's bundled assets and renderer. `--friction 1.0` is the
+strongest single lever (16/20 combined) but isn't a clean fix on its own.
+
+**Planned fix: self-imitation fine-tuning.** Collect successful rollouts in *this* sim
+(`--record_dir`), convert them to a LeRobot v2.1 dataset, and further fine-tune `checkpoint-5000`
+on them so the policy adapts to whatever's actually different about this Isaac Sim version — see
+`scripts/selfimit/` below. Treated as the main path if friction tuning doesn't close the gap on
+its own; genuinely useful even if friction does, since Sim-version drift of this kind isn't a
+one-time problem.
+
+### `scripts/selfimit/` — self-imitation fine-tune pipeline
+
+- **`npz_to_lerobot.py`** — converts `--record_dir`'s `.npz` episodes into a LeRobot v2.1 dataset
+  (parquet + h264 mp4 + meta/*). `--max_steps` (default 540) keeps only the cleaner/faster
+  successes. Video codec is h264, not av1 — `gr00t/utils/video_utils.py`'s only decoder is
+  `torchcodec.decoders.VideoDecoder`, and this repo ships
+  `examples/SimplerEnv/convert_av1_to_h264.py` specifically to get *off* av1, so h264 is the
+  proven-safe choice here, not a guess. **Also seeds `meta/stats.json` from the original
+  checkpoint's own normalization statistics by default** (`--seed_stats_from`, defaults to
+  `/home/ubuntu/gr00t_checkpoint/statistics.json`) — without this, GR00T's `generate_stats()`
+  would recompute normalization ranges from the self-imitation set, which is narrower than the
+  original demonstration spread (it's the policy's own successful outputs), silently shifting the
+  space the pretrained action head was trained to decode in. Confirmed working by diffing
+  `generate_stats()`'s output before/after seeding: state/action stats come back byte-identical,
+  not recomputed.
+- **`franka_stack_modality_config.py`** — registers the `new_embodiment` tag's modality config
+  (video/state/action/language schema, matching `checkpoint-5000`'s own
+  `experiment_cfg/conf.yaml` exactly). Needed because `new_embodiment` isn't pre-registered
+  anywhere in `gr00t/configs/data/embodiment_configs.py` — the original training run's modality
+  config file was lost the same way as everything else; this is the reconstruction, verified by
+  actually loading a converted episode through `gr00t.data.dataset.sharded_single_step_dataset.
+  ShardedSingleStepDataset` end to end (not just file-existence-checked).
+- **`launch_finetune_selfimit.sh`** — **not run yet.** `--base-model-path` (not
+  `--resume-from-checkpoint`, which means something different — continuing an interrupted run in
+  the same output dir, not further-tuning a finished checkpoint on new data) points at the
+  existing `checkpoint-5000`; `--learning-rate 5e-5` (halved from the original `1e-4` since this
+  is a further fine-tune of an already-converged checkpoint on a small new dataset, not a fresh
+  run); `--global-batch-size 16`, `--max-steps 1500`, `--save-steps 500`. Flag names verified
+  against `launch_finetune.py --help` directly.
