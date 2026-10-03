@@ -562,3 +562,65 @@ class FrankaCubeStackRLStrictFullEnvCfg(FrankaCubeStackRLStrictFullSnapEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.events.reset_from_snapshot = None
+
+
+# --- Milestone variants: one-time sparse sub-goal bonuses (grasp, lift, over-target, placed) plus the per-step
+# completion reward (``robosuite_rewards.milestone_stack_reward``). No continuous shaping, no smoothness
+# penalties, no pretrained/BC weights.
+
+
+@configclass
+class MilestoneRewardsCfg:
+    stack = RewTerm(func=robosuite_rewards.milestone_stack_reward, weight=1.0, params={"mode": "stage1"})
+
+
+@configclass
+class MilestoneStage2RewardsCfg:
+    stack = RewTerm(func=robosuite_rewards.milestone_stack_reward, weight=1.0, params={"mode": "stage2"})
+
+
+@configclass
+class MilestoneFullRewardsCfg:
+    stack = RewTerm(func=robosuite_rewards.milestone_stack_reward, weight=1.0, params={"mode": "full"})
+
+
+@configclass
+class FrankaCubeStackRLMilestoneS1SnapEnvCfg(FrankaCubeStackRLRobosuiteSnapSparseEnvCfg):
+    """Stage 1, milestone reward, expert 'red carried onto blue' starts (set the fraction with ``prob``)."""
+
+    rewards: MilestoneRewardsCfg = MilestoneRewardsCfg()
+
+
+
+@configclass
+class FrankaCubeStackRLMilestoneS1EnvCfg(FrankaCubeStackRLMilestoneS1SnapEnvCfg):
+    """Stage 1, milestone reward, ordinary starts only."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.events.reset_from_snapshot = None
+
+
+@configclass
+class FrankaCubeStackRLMilestoneStage2SkillEnvCfg(FrankaCubeStackRLStage2SkillEnvCfg):
+    """Stage-2 skill (green onto red-on-blue), milestone reward, expert stage-2 start states."""
+
+    rewards: MilestoneStage2RewardsCfg = MilestoneStage2RewardsCfg()
+
+
+
+@configclass
+class FrankaCubeStackRLMilestoneFullSnapEnvCfg(FrankaCubeStackRLTowerOnlySnapEnvCfg):
+    """One end-to-end policy for the whole tower, milestone reward for both levels, expert start-state mix."""
+
+    rewards: MilestoneFullRewardsCfg = MilestoneFullRewardsCfg()
+
+
+
+@configclass
+class FrankaCubeStackRLMilestoneFullEnvCfg(FrankaCubeStackRLMilestoneFullSnapEnvCfg):
+    """One end-to-end policy for the whole tower, milestone reward, ordinary starts only."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.events.reset_from_snapshot = None
