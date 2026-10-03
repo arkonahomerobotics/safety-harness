@@ -89,18 +89,28 @@ with torch.inference_mode():
     staged_term = env.reward_manager.get_term_cfg("staged_achievements").func
     ever_achieved = torch.zeros(N, dtype=torch.bool, device=dev)
 
+    # KAN-44: this re-derived check used to measure clearance from the wrist alone, which
+    # diverged from the training-time criterion once rl_rewards_g1.py's staged_achievements was
+    # fixed to require fingertip clearance (see that module's LEFT_HAND_LINKS) -- a checkpoint
+    # could score well on Achievements/success_rate during training yet still fail this harder,
+    # re-derived check if the two definitions disagreed. Same link set, so they can't diverge again.
+    from isaaclab_tasks.contrib.locomanip_pick_place.mdp.rl_rewards_g1 import LEFT_HAND_LINKS
+
+    _hand_link_ids = [env.scene["robot"].data.body_names.index(name) for name in LEFT_HAND_LINKS]
+
     def stacked_now() -> torch.Tensor:
         """Blue seated on red, red on the table, blue at rest, hand clear -- on the live scene."""
         o_ = env.scene.env_origins
         pa = env.scene["object"].data.root_pos_w.torch - o_
         pb = env.scene["block_b"].data.root_pos_w.torch - o_
         r = env.scene["robot"]
-        w = r.data.body_pos_w.torch[:, r.data.body_names.index("left_wrist_yaw_link")] - o_
+        hand_pos = r.data.body_pos_w.torch[:, _hand_link_ids] - o_.unsqueeze(1)
+        hand_clear = torch.linalg.norm(hand_pos - pa.unsqueeze(1), dim=2).min(dim=1).values
         dxy = torch.linalg.norm((pa - pb)[:, :2], dim=1)
         dz = pa[:, 2] - pb[:, 2] - 0.045
         still = torch.linalg.norm(env.scene["object"].data.root_vel_w.torch[:, :3], dim=1) < 0.03
         b_on_table = (pb[:, 2] - env.cfg.scene.block_b.init_state.pos[2]).abs() < 0.01
-        return (dxy < 0.025) & (dz.abs() < 0.012) & still & b_on_table & (torch.linalg.norm(pa - w, dim=1) > 0.11)  # Kaoru-approved 2.5cm, 2026-10-03
+        return (dxy < 0.025) & (dz.abs() < 0.012) & still & b_on_table & (hand_clear > 0.11)  # Kaoru-approved 2.5cm, 2026-10-03
 
     # Isaac Lab resets an env inside the very step() that times it out, so the scene read after the
     # loop (or after the done step) is the NEXT episode's reset pose -- that made "standing at the

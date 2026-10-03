@@ -43,6 +43,18 @@ LEFT_HAND_JOINT_NAMES = (
     "left_hand_thumb_2_joint",
 )
 
+# Palm + every finger link -- same set capture_stage1_handoff.py's own post-hoc filter uses (KAN-44).
+# The hand extends ~9-10cm past the wrist, so a wrist-only "clear" check passed at states where a
+# fingertip (left_hand_middle_1_link specifically, diagnosed via diagnose_body_sweep.py) was only
+# ~5-6cm from the block -- real enough for the release to knock it off on handoff. KAN-44: make the
+# TRAINING-time success/release criterion itself require fingertip clearance, not just the wrist, so
+# the policy actually learns to clear the block rather than relying on post-hoc snapshot filtering to
+# catch the (small) fraction of wrist-clear states that happen to also be fingertip-clear.
+LEFT_HAND_LINKS = (
+    "left_hand_palm_link", "left_hand_index_0_link", "left_hand_middle_0_link", "left_hand_thumb_0_link",
+    "left_hand_index_1_link", "left_hand_middle_1_link", "left_hand_thumb_1_link", "left_hand_thumb_2_link",
+)
+
 
 def _tanh_dist(distance: torch.Tensor, std: float) -> torch.Tensor:
     return 1.0 - torch.tanh(distance / std)
@@ -52,6 +64,16 @@ def _left_wrist_pos(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, wrist_lin
     robot: Articulation = env.scene[robot_cfg.name]
     idx = robot.data.body_names.index(wrist_link_name)
     return robot.data.body_pos_w.torch[:, idx] - env.scene.env_origins
+
+
+def _left_hand_min_dist(
+    env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg, hand_link_ids: list[int], target_pos: torch.Tensor
+) -> torch.Tensor:
+    """Minimum distance from ANY left-hand link (palm + fingers, see LEFT_HAND_LINKS) to target_pos --
+    the real "is the hand out of the way" measure (KAN-44), as opposed to the single wrist point."""
+    robot: Articulation = env.scene[robot_cfg.name]
+    hand_pos = robot.data.body_pos_w.torch[:, hand_link_ids] - env.scene.env_origins.unsqueeze(1)
+    return torch.linalg.norm(hand_pos - target_pos.unsqueeze(1), dim=2).min(dim=1).values
 
 
 def _finger_closed_frac(
@@ -88,6 +110,7 @@ class staged_achievements(ManagerTermBase):
         robot: Articulation = env.scene["robot"]
         joint_ids, _ = robot.find_joints(list(LEFT_HAND_JOINT_NAMES))
         self._joint_ids = joint_ids
+        self._hand_link_ids = [robot.data.body_names.index(name) for name in LEFT_HAND_LINKS]
         limits = robot.data.soft_joint_pos_limits.torch[0, joint_ids]
         lo, hi = limits[:, 0], limits[:, 1]
         # Open = the rest pose (every hand joint reads 0.0 at reset) clamped into the soft limits;
@@ -186,7 +209,7 @@ class staged_achievements(ManagerTermBase):
             base_ok = (
                 base_on_table
                 & (torch.linalg.norm(base.data.root_vel_w.torch[:, :3], dim=1) < success_max_speed)
-                & (torch.linalg.norm(base_pos - wrist_pos, dim=1) > hand_clear_dist)
+                & (_left_hand_min_dist(env, robot_cfg, self._hand_link_ids, base_pos) > hand_clear_dist)
             )
         else:
             aligned = dist_dest < align_xy_threshold  # 3D distance -- no separate surface to be "on top of" here
@@ -240,7 +263,7 @@ class staged_achievements(ManagerTermBase):
         # below 30% closure, < 0.2 m/s" test was satisfied transiently while the block was still
         # tipping off the red one -- PPO learned to trigger it (85% "success", mostly not stacked).
         settled = torch.linalg.norm(object_.data.root_vel_w.torch[:, :3], dim=1) < success_max_speed
-        clear = dist_to_obj > hand_clear_dist
+        clear = _left_hand_min_dist(env, robot_cfg, self._hand_link_ids, object_pos) > hand_clear_dist
         cond = aligned & settled & (~grasped) & clear & (finger_frac < finger_closed_threshold) & base_ok
         self._success_streak = torch.where(cond, self._success_streak + 1, torch.zeros_like(self._success_streak))
         success = self._success_streak >= success_hold_steps
