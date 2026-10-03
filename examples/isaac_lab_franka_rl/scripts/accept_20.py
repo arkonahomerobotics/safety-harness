@@ -36,6 +36,7 @@ parser.add_argument("--seed_base", type=int, default=100, help="episode i uses s
 parser.add_argument("--handoff_steps", type=int, default=10)
 parser.add_argument("--video", action="store_true", help="write one captioned mp4 per episode")
 parser.add_argument("--video_dir", type=str, default="accept_20_videos")
+parser.add_argument("--label", type=str, default="Franka 3-cube policy", help="caption text prefix burned into the video (say what the policy is, e.g. BC vs RL)")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.headless = True
@@ -246,7 +247,7 @@ for i in range(args_cli.episodes):
         from PIL import Image, ImageDraw, ImageFont
         import imageio.v2 as imageio
 
-        caption = f"Franka 3-cube RL policy, episode {i + 1}/{args_cli.episodes}, {'SUCCESS' if success else 'FAIL'}"
+        caption = f"{args_cli.label}, episode {i + 1}/{args_cli.episodes}, {'SUCCESS' if success else 'FAIL'}"
         try:
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 20)
         except OSError:
