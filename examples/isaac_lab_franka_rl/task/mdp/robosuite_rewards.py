@@ -223,9 +223,10 @@ class full_stack_sparse_reward(ManagerTermBase):
 class milestone_stack_reward(ManagerTermBase):
     """One-time milestone bonuses on the way to a stack, plus a per-step completion reward.
 
-    For each stacking level (level 1: red onto blue; level 2: green onto red) four real, discrete sub-goals pay
+    For each stacking level (level 1: red onto blue; level 2: green onto red) five real, discrete sub-goals pay
     ``milestone_values`` exactly once per episode, the first time each is reached:
 
+        reach   the gripper centre is within ``reach_dist`` of the cube
         grasp   both finger pads touch the cube
         lift    grasped and the cube centre is above ``lift_z``
         over    grasped, lifted, and within ``over_xy`` horizontally of the cube below
@@ -243,14 +244,14 @@ class milestone_stack_reward(ManagerTermBase):
     cube lifted, and the rate of episodes that reached "over" but never completed.
     """
 
-    NAMES = ("grasp", "lift", "over", "placed")
+    NAMES = ("reach", "grasp", "lift", "over", "placed")
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
         n, d = env.num_envs, env.device
         self._steps = torch.zeros(n, device=d)
         self._held_lifted_steps = torch.zeros(n, device=d)
-        self._done = torch.zeros(n, 2, 4, dtype=torch.bool, device=d)
+        self._done = torch.zeros(n, 2, 5, dtype=torch.bool, device=d)
         self._complete_ever = torch.zeros(n, dtype=torch.bool, device=d)
         self._complete_now = torch.zeros(n, dtype=torch.bool, device=d)
 
@@ -273,7 +274,7 @@ class milestone_stack_reward(ManagerTermBase):
             log["Milestone/held_lifted_frac_steps"] = (
                 self._held_lifted_steps[env_ids] / self._steps[env_ids].clamp(min=1)
             ).mean().item()
-            stuck = self._done[env_ids, :, 2].any(dim=1) & ~self._complete_ever[env_ids]
+            stuck = self._done[env_ids, :, 3].any(dim=1) & ~self._complete_ever[env_ids]
             log["Milestone/reached_over_never_completed"] = stuck.float().mean().item()
         self._steps[env_ids] = 0.0
         self._held_lifted_steps[env_ids] = 0.0
@@ -281,8 +282,10 @@ class milestone_stack_reward(ManagerTermBase):
         self._complete_ever[env_ids] = False
         self._complete_now[env_ids] = False
 
-    def _level(self, env, upper, lower, contact_sensor, finger_sensors, lift_z, over_xy, thr):
+    def _level(self, env, upper, lower, contact_sensor, finger_sensors, lift_z, over_xy, thr, reach_dist):
         up = env.scene[upper].data.root_pos_w.torch
+        ee = env.scene["ee_frame"].data.target_pos_w.torch[:, 0, :]
+        reach = torch.linalg.norm(ee - up, dim=1) < reach_dist
         lo = env.scene[lower].data.root_pos_w.torch
         grasp = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
         for name in finger_sensors:
@@ -293,7 +296,7 @@ class milestone_stack_reward(ManagerTermBase):
         lift = grasp & lifted
         over = lift & near
         placed = lifted & touching & ~grasp
-        return torch.stack((grasp, lift, over, placed), dim=1)
+        return torch.stack((reach, grasp, lift, over, placed), dim=1)
 
     def __call__(
         self,
@@ -301,37 +304,38 @@ class milestone_stack_reward(ManagerTermBase):
         mode: str = "stage1",
         lift_z: float = 0.0403,
         over_xy: float = 0.03,
+        reach_dist: float = 0.04,
         contact_threshold: float = 0.01,
         reward_scale: float = 1.0,
-        milestone_values: tuple[float, float, float, float] = (0.2, 0.4, 0.6, 0.8),
+        milestone_values: tuple[float, float, float, float, float] = (0.1, 0.2, 0.4, 0.5, 0.8),
         completion_reward: float = 2.0,
     ) -> torch.Tensor:
         thr = contact_threshold
         l1 = self._level(
             env, "cube_2", "cube_1", "red_blue_contact", ("left_finger_red_contact", "right_finger_red_contact"),
-            lift_z, over_xy, thr,
+            lift_z, over_xy, thr, reach_dist,
         )
         vals = torch.tensor(milestone_values, device=env.device)
         reward = torch.zeros(env.num_envs, device=env.device)
-        held_lifted = l1[:, 1]
+        held_lifted = l1[:, 2]
 
         if mode in ("stage1", "full"):
             new = l1 & ~self._done[:, 0]
             reward += (new.float() * vals).sum(dim=1)
             self._done[:, 0] |= l1
         if mode == "stage1":
-            complete = l1[:, 3]
+            complete = l1[:, 4]
         else:
             l2 = self._level(
                 env, "cube_3", "cube_2", "green_red_contact",
-                ("left_finger_green_contact", "right_finger_green_contact"), lift_z, over_xy, thr,
+                ("left_finger_green_contact", "right_finger_green_contact"), lift_z, over_xy, thr, reach_dist,
             )
-            l2 = l2 & l1[:, 3:4]  # level-2 milestones count only while red stands on blue
+            l2 = l2 & l1[:, 4:5]  # level-2 milestones count only while red stands on blue
             new = l2 & ~self._done[:, 1]
             reward += (new.float() * vals).sum(dim=1)
             self._done[:, 1] |= l2
-            complete = l2[:, 3]
-            held_lifted = l2[:, 1] if mode == "stage2" else (l1[:, 1] | l2[:, 1])
+            complete = l2[:, 4]
+            held_lifted = l2[:, 2] if mode == "stage2" else (l1[:, 2] | l2[:, 2])
 
         reward += completion_reward * (2.0 if mode != "stage1" else 1.0) * complete.float()
         self._steps += 1.0
