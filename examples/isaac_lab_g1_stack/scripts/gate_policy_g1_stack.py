@@ -42,7 +42,9 @@ import torch  # noqa: E402
 
 import gymnasium as gym  # noqa: E402
 import isaaclab_tasks  # noqa: F401,E402
-from isaaclab.utils.math import quat_apply  # noqa: E402
+import isaaclab.sim as sim_utils  # noqa: E402
+from isaaclab.sensors import CameraCfg  # noqa: E402
+from isaaclab.utils.math import create_rotation_matrix_from_view, quat_apply, quat_from_matrix  # noqa: E402
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
 
 from safety_harness.action_schema import ActionSchemaRegistry  # noqa: E402
@@ -222,7 +224,24 @@ if args_cli.video:
     # visible past the arm's swing instead of looking through it edge-on.
     env_cfg.viewer.eye = (-0.20, -0.55, 2.05)
     env_cfg.viewer.lookat = (-0.19, 0.35, 0.72)
-env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None).unwrapped
+    # env.render(render_mode="rgb_array") is gone in this IsaacLab version (unconditionally returns
+    # None -- confirmed in source, not just a deprecation warning). Replaced with a real scene camera
+    # at the exact same eye/lookat this task already debugged, since env.render() never needed a
+    # look-at quaternion itself (Isaac Sim's viewport handled that internally) -- computed here with
+    # IsaacLab's own create_rotation_matrix_from_view/quat_from_matrix rather than hand-rolled math.
+    _eye_t = torch.tensor([env_cfg.viewer.eye], dtype=torch.float32)
+    _lookat_t = torch.tensor([env_cfg.viewer.lookat], dtype=torch.float32)
+    _demo_rot = quat_from_matrix(create_rotation_matrix_from_view(_eye_t, _lookat_t, up_axis="Z"))[0].tolist()
+    env_cfg.scene.demo_cam = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/demo_cam",
+        update_period=0.0,
+        height=720,
+        width=1280,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(focal_length=24.0, focus_distance=400.0, clipping_range=(0.05, 10.0)),
+        offset=CameraCfg.OffsetCfg(pos=env_cfg.viewer.eye, rot=tuple(_demo_rot), convention="opengl"),
+    )
+env = gym.make(args_cli.task, cfg=env_cfg, render_mode=None).unwrapped
 
 stats = {"scenario": SC, "gated": bool(args_cli.gated), "checkpoint": args_cli.checkpoint,
          "decisions": {}, "blocked_by": {}, "tamper_caught": 0, "tamper_executed": 0}
@@ -354,7 +373,7 @@ with torch.inference_mode():
                 hz = f"INJECTED: block_a mass overridden to {masses_a[0]:.1f} kg (exceeds rated payload and grip-force budget)"
             else:
                 hz = "no hazard"
-            rgb = env.render()
+            rgb = env.scene.sensors["demo_cam"].data.output["rgb"][0].to(torch.uint8).cpu().numpy()
             frame = annotate(rgb, f"Unitree G1  |  safety-harness v0.3.5  |  t = {t / args_cli.fps:5.1f} s",
                              f"{action_kind0} (learned policy)", v0, fired0 if v0 == "block" else [], hz,
                              "Isaac Lab simulation, privileged perception")
