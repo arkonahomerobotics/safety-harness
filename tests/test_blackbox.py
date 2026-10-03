@@ -228,8 +228,27 @@ class BlackBoxContractTests(unittest.TestCase):
 
     def test_identical_input_gives_identical_decision(self):
         """A safety decision that isn't reproducible for the exact same input is itself a hazard --
-        this is checkable from outside with zero knowledge of internals."""
+        this is checkable from outside with zero knowledge of internals.
+
+        Needs a fixed clock injected into both runs. ``decision_within_deadline`` deliberately
+        measures real elapsed wall-clock time between when ActuatorGate.gate() started and when
+        that check runs -- that is its entire job (catching a decision that took too long for a
+        reason no other check can see), not a bug. Two independently-constructed gates processing
+        the literal same input a few microseconds apart will, correctly, measure a *different*
+        elapsed time each time if left to the engine's default real clock, which makes
+        ``PreconditionResult.reason``'s embedded millisecond figure differ, and -- rarely, only
+        under real system load, if the elapsed time happens to straddle the deadline -- can flip
+        ``satisfied`` itself. Found by an independent third-party review: this flipped once at
+        trial 434 of 1000 in a loop. That is real, desired behavior for one long-lived
+        ActuatorGate in an actual deployment, where elapsed-time measurements naturally differ
+        decision to decision; it has nothing to do with whether *this test's* two reconstructed
+        gates were given the same input. The fix belongs here, in the test, not in
+        decision_within_deadline: inject the same deterministic clock into both constructions so
+        the property this test actually means to check -- same input, same engine logic, same
+        decision -- isn't confounded by real time having moved between the two calls.
+        """
         rng = random.Random(SEED + 2)
+        frozen_clock = lambda: 0.0  # noqa: E731 -- elapsed is always 0.0 - 0.0, identically, every call
         nondeterministic = []
         for i in range(1000):
             state = gen_random_world_state(rng)
@@ -241,6 +260,7 @@ class BlackBoxContractTests(unittest.TestCase):
                     perception=_Perception(state), dynamics=_Dynamics(traj),
                     fallback=FreezeInPlaceFallback(), logger=InMemoryLogger(),
                     action_schema=ActionSchemaRegistry.from_yaml(SCHEMA_PATH),
+                    clock=frozen_clock,
                 )
                 try:
                     d = gate.gate(action)
@@ -252,6 +272,39 @@ class BlackBoxContractTests(unittest.TestCase):
             if r1 != r2:
                 nondeterministic.append((i, r1, r2))
         self.assertEqual(nondeterministic, [], f"non-deterministic decisions for identical input: {nondeterministic[:5]}")
+
+    def test_frozen_clock_makes_the_full_decision_byte_identical(self):
+        """Regression test for the exact bug class above, pinned down directly rather than relying
+        on randomly hitting it again: one hand-built state/action/trajectory, two independently
+        constructed gates, the same frozen clock given to both. Asserts full ``Decision`` equality
+        -- not just the (verdict, action, satisfied-tuple) the test above checks -- so this also
+        catches a ``PreconditionResult.reason`` string differing even when every ``satisfied`` value
+        happens to agree, which is exactly the form this bug actually took (see
+        ``decision_within_deadline``'s docstring): the embedded elapsed-time figure in the reason
+        text varied between two otherwise-identical runs under the engine's default real clock. If
+        clock injection into ``ActuatorGate``/``CheckContext`` is ever broken, this fails
+        immediately, independent of the random generator and of real-world timing variance.
+        """
+        rng = random.Random(SEED + 99)
+        state = gen_random_world_state(rng)
+        action = gen_random_action(rng)
+        traj = gen_random_trajectory(rng, state.robot)
+
+        def decide():
+            gate = ActuatorGate(
+                perception=_Perception(state), dynamics=_Dynamics(traj),
+                fallback=FreezeInPlaceFallback(), logger=InMemoryLogger(),
+                action_schema=ActionSchemaRegistry.from_yaml(SCHEMA_PATH),
+                clock=lambda: 42.0,
+            )
+            return gate.gate(action)
+
+        d1, d2 = decide(), decide()
+        self.assertEqual(
+            d1, d2,
+            "a frozen clock should make the full Decision -- including every PreconditionResult's "
+            "reason string -- byte-identical across two separate gate() calls on the same input",
+        )
 
     def test_unrecognizable_action_type_never_permits(self):
         """Without knowing what the loaded schema declares, a sufficiently novel action_type string
