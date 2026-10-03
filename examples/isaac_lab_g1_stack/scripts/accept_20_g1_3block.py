@@ -123,6 +123,22 @@ robot = env.scene["robot"]
 widx = robot.data.body_names.index("left_wrist_yaw_link")
 o_ = env.scene.env_origins
 
+# KAN-44: stage1_stacked_full()'s hand-clear check must match the training-time criterion
+# (rl_rewards_g1.staged_achievements) now that it requires fingertip clearance, not just wrist
+# clearance -- otherwise the handoff streak here could fire on states the policy was never
+# actually trained to reach, the same training-vs-acceptance divergence a wrist-only re-derivation
+# caused on the Franka side (PR #39). full_tower_ok()'s own block-C clearance is Stage 2's own
+# success definition, a separate concern, not touched here.
+from isaaclab_tasks.contrib.locomanip_pick_place.mdp.rl_rewards_g1 import LEFT_HAND_LINKS
+
+_hand_link_ids = [robot.data.body_names.index(name) for name in LEFT_HAND_LINKS]
+
+
+def _hand_clear_dist(target_pos) -> float:
+    hand_pos = robot.data.body_pos_w.torch[0, _hand_link_ids] - o_[0]
+    return float(torch.linalg.norm(hand_pos - target_pos, dim=1).min())
+
+
 if args_cli.video:
     os.makedirs(args_cli.video_dir, exist_ok=True)
     env.scene["demo_cam"].set_world_poses_from_view(
@@ -166,12 +182,13 @@ def c_on_a_positions_ok() -> bool:
 
 
 def stage1_stacked_full() -> bool:
-    """A seated on B, settled, hand clear of A -- Stage 1's OWN success definition, unchanged from
-    eval_policy.py's/eval_sequential_single_env.py's stacked_now(). Used only to decide when the
-    real 2-block task has actually been earned (the handoff streak), not for final judging."""
+    """A seated on B, settled, hand clear of A -- Stage 1's OWN success definition, matching
+    eval_policy.py's/eval_sequential_single_env.py's stacked_now() (KAN-44: fingertip clearance,
+    not wrist-only). Used only to decide when the real 2-block task has actually been earned (the
+    handoff streak), not for final judging."""
     if not a_on_b_positions_ok():
         return False
-    return (_speed(object_) < 0.03) and (float(torch.linalg.norm(_pos(object_) - _wrist_pos())) > 0.11)
+    return (_speed(object_) < 0.03) and (_hand_clear_dist(_pos(object_)) > 0.11)
 
 
 def full_tower_ok() -> bool:
