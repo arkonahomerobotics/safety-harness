@@ -34,6 +34,7 @@ parser.add_argument("--stage2", type=str, required=True)
 parser.add_argument("--episodes", type=int, default=20)
 parser.add_argument("--seed_base", type=int, default=100, help="episode i uses seed seed_base + i")
 parser.add_argument("--handoff_steps", type=int, default=10)
+parser.add_argument("--start_episode", type=int, default=0, help="resume at 0-based episode index (seeds, numbering and video names follow the global index); the final ACCEPT denominator then counts only episodes run here")
 parser.add_argument("--video", action="store_true", help="write one captioned mp4 per episode")
 parser.add_argument("--video_dir", type=str, default="accept_20_videos")
 parser.add_argument("--label", type=str, default="Franka 3-cube policy", help="caption text prefix burned into the video (say what the policy is, e.g. BC vs RL)")
@@ -157,7 +158,7 @@ def classify(handed, lost_t, lost_green_held, s1_last, tower_last, end_green_hel
 
 
 results = []
-for i in range(args_cli.episodes):
+for i in range(args_cli.start_episode, args_cli.episodes):
     seed = args_cli.seed_base + i
     torch.manual_seed(seed)
     # Explicit, seeded reset for THIS episode -- deliberately not relying on the auto-reset the
@@ -273,8 +274,9 @@ for r in results:
           f"{'yes' if r['tower_ever'] else 'no':>5} {'yes' if r['handed_off'] else 'no':>7} "
           f"{r['hand_t']:>7}  {r['reason']}")
 print("=" * 90)
-print(f"Tower standing at episode end: {k}/{args_cli.episodes}   Tower achieved at any point: {k_ever}/{args_cli.episodes}")
-print(f"ACCEPT {k}/{args_cli.episodes}")
+n_run = args_cli.episodes - args_cli.start_episode
+print(f"Tower standing at episode end: {k}/{n_run}   Tower achieved at any point: {k_ever}/{n_run}")
+print(f"ACCEPT {k}/{n_run}")
 print("=" * 90)
 
 env.close()
