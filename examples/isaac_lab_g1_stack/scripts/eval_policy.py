@@ -51,6 +51,11 @@ def load_actor(path, device):
 
 env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
 env_cfg.seed = args_cli.seed
+# robot_pov_cam is defined unconditionally on the base scene cfg (XR teleop leftover, same
+# pattern as left_hand_contact/right_hand_contact) -- this script never reads it, and it only
+# renders correctly when enable_cameras is set, which only happens under --video. Left enabled,
+# it crashes sensor init with ValueError: Invalid object in Py_Graph in getWrappedGraphFromNode.
+env_cfg.scene.robot_pov_cam = None
 if args_cli.full_episode:
     env_cfg.terminations.success = None
 if args_cli.video:
@@ -77,15 +82,43 @@ with torch.inference_mode():
     outcome = torch.full((N,), -1, dtype=torch.long, device=dev)  # -1 running, 0 success, 1 dropped, 2 timeout
     ep_len = torch.zeros(N, device=dev)
     frames = []
+    # "Achieved at any point" vs "standing at the end" -- reuse the exact staged_achievements
+    # reward term's own success flag (mdp/rl_rewards_g1.py's stack_success() reads the same
+    # _last_success attribute off this same live term instance), not a re-derived check, so
+    # training's Achievements/success_rate and this number are judged by one definition.
+    staged_term = env.reward_manager.get_term_cfg("staged_achievements").func
+    ever_achieved = torch.zeros(N, dtype=torch.bool, device=dev)
+
+    def stacked_now() -> torch.Tensor:
+        """Blue seated on red, red on the table, blue at rest, hand clear -- on the live scene."""
+        o_ = env.scene.env_origins
+        pa = env.scene["object"].data.root_pos_w.torch - o_
+        pb = env.scene["block_b"].data.root_pos_w.torch - o_
+        r = env.scene["robot"]
+        w = r.data.body_pos_w.torch[:, r.data.body_names.index("left_wrist_yaw_link")] - o_
+        dxy = torch.linalg.norm((pa - pb)[:, :2], dim=1)
+        dz = pa[:, 2] - pb[:, 2] - 0.045
+        still = torch.linalg.norm(env.scene["object"].data.root_vel_w.torch[:, :3], dim=1) < 0.03
+        b_on_table = (pb[:, 2] - env.cfg.scene.block_b.init_state.pos[2]).abs() < 0.01
+        return (dxy < 0.025) & (dz.abs() < 0.012) & still & b_on_table & (torch.linalg.norm(pa - w, dim=1) > 0.11)  # Kaoru-approved 2.5cm, 2026-10-03
+
+    # Isaac Lab resets an env inside the very step() that times it out, so the scene read after the
+    # loop (or after the done step) is the NEXT episode's reset pose -- that made "standing at the
+    # end" 0/N for every checkpoint. Judge each env on the last pre-reset state instead: the scene
+    # as it was entering the step that ended its episode (one 20ms control step before the end).
+    final_stacked = torch.zeros(N, dtype=torch.bool, device=dev)
     for step in range(env.max_episode_length + 5):
+        pre_stacked = stacked_now()
         act = policy(obs["policy"])
         if args_cli.noise > 0:
             act = act + args_cli.noise * torch.randn_like(act)
         act = act.clamp(-1, 1)
         obs, rew, term, trunc, extras = env.step(act)
+        ever_achieved |= getattr(staged_term, "_last_success", torch.zeros(N, dtype=torch.bool, device=dev))
         if args_cli.video:
             frames.append(env.scene["demo_cam"].data.output["rgb"][0, ..., :3].clone().cpu())
         done = (term | trunc) & (outcome < 0)
+        final_stacked = torch.where(done, pre_stacked, final_stacked)
         if done.any():
             succ = (tm.get_term("success") if "success" in tm.active_terms else torch.zeros_like(done)) & done
             drop = (tm.get_term("block_a_dropped") | tm.get_term("block_b_dropped")) & done & ~succ
@@ -96,19 +129,13 @@ with torch.inference_mode():
         if bool((outcome >= 0).all()):
             break
     if args_cli.full_episode or "success" not in tm.active_terms:
-        # judge the end state: blue seated on red, at rest, hand clear
-        o_ = env.scene.env_origins
-        pa = env.scene["object"].data.root_pos_w.torch - o_
-        pb = env.scene["block_b"].data.root_pos_w.torch - o_
-        r = env.scene["robot"]
-        w = r.data.body_pos_w.torch[:, r.data.body_names.index("left_wrist_yaw_link")] - o_
-        dxy = torch.linalg.norm((pa - pb)[:, :2], dim=1)
-        dz = pa[:, 2] - pb[:, 2] - 0.045
-        still = torch.linalg.norm(env.scene["object"].data.root_vel_w.torch[:, :3], dim=1) < 0.03
-        stacked = (dxy < 0.015) & (dz.abs() < 0.012) & still & (torch.linalg.norm(pa - w, dim=1) > 0.11)
+        # judge the end state (last pre-reset state, see final_stacked above)
+        stacked = final_stacked
         outcome = torch.where(stacked, torch.zeros_like(outcome), torch.where(outcome == 1, outcome, torch.full_like(outcome, 2)))
         print(f"FULL-EPISODE end state: stacked & released at t=10s: {int(stacked.sum())}/{N}")
     s = (outcome == 0)
+    print(f"ACHIEVED-AT-ANY-POINT (staged_achievements' own success flag, same def as training): "
+          f"{int(ever_achieved.sum())}/{N}")
     print(f"EVAL {args_cli.checkpoint}: success {int(s.sum())}/{N} ({s.float().mean()*100:.1f}%)  "
           f"dropped {int((outcome == 1).sum())}  timeout {int((outcome == 2).sum())}  "
           f"mean success ep len {ep_len[s].mean() if s.any() else float('nan'):.0f} steps")
