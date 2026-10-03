@@ -83,6 +83,7 @@ class staged_achievements(ManagerTermBase):
         self._release_misaligned_count = torch.zeros(n, dtype=torch.float32, device=d)
         self._success_streak = torch.zeros(n, dtype=torch.long, device=d)
         self._last_success = torch.zeros(n, dtype=torch.bool, device=d)
+        self._aligned_release_done = torch.zeros(n, dtype=torch.bool, device=d)
 
         robot: Articulation = env.scene["robot"]
         joint_ids, _ = robot.find_joints(list(LEFT_HAND_JOINT_NAMES))
@@ -97,7 +98,7 @@ class staged_achievements(ManagerTermBase):
         self._closed_vals = torch.where(lo.abs() > hi.abs(), lo, hi)
 
     def reset(self, env_ids: torch.Tensor):
-        if len(env_ids) > 0:
+        if isinstance(env_ids, slice) or len(env_ids) > 0:  # env_ids may be slice(None) for a full reset
             log = self._env.extras.setdefault("log", {})
             log["Achievements/reach_budget_used"] = self._reach_budget_used[env_ids].mean().item()
             log["Achievements/grasped_rate"] = self._grasped_done[env_ids].float().mean().item()
@@ -116,6 +117,7 @@ class staged_achievements(ManagerTermBase):
         self._release_aligned_count[env_ids] = 0.0
         self._release_misaligned_count[env_ids] = 0.0
         self._success_streak[env_ids] = 0
+        self._aligned_release_done[env_ids] = False
         # else the success termination (read one step later) would see the PREVIOUS episode's flag
         self._last_success[env_ids] = False
 
@@ -147,6 +149,7 @@ class staged_achievements(ManagerTermBase):
         success_max_speed: float = 0.2,
         hand_clear_dist: float = 0.0,
         hold_reward: float = 0.0,
+        base_rest_z_tol: float = 0.01,
     ) -> torch.Tensor:
         object_: RigidObject = env.scene[object_cfg.name]
         object_pos = object_.data.root_pos_w.torch - env.scene.env_origins
@@ -172,8 +175,22 @@ class staged_achievements(ManagerTermBase):
         if place_asset_cfg is not None:
             off = object_pos - place_target
             aligned = (torch.linalg.norm(off[:, :2], dim=1) < stack_xy_tol) & (off[:, 2].abs() < stack_z_tol)
+            # "Aligned" is relative to the base block's live pose, so on its own it was satisfied with the
+            # base block lifted off the table and the top block riding on it -- PPO learned exactly that
+            # (90% "success", tower held at head height, 0/10 standing at t=10s). The base block must be
+            # resting at its own reset height, still, and clear of the hand.
+            base_pos = base.data.root_pos_w.torch - env.scene.env_origins
+            base_rest_z = getattr(env.cfg.scene, place_asset_cfg.name).init_state.pos[2]
+            base_on_table = (base_pos[:, 2] - base_rest_z).abs() < base_rest_z_tol
+            aligned = aligned & base_on_table
+            base_ok = (
+                base_on_table
+                & (torch.linalg.norm(base.data.root_vel_w.torch[:, :3], dim=1) < success_max_speed)
+                & (torch.linalg.norm(base_pos - wrist_pos, dim=1) > hand_clear_dist)
+            )
         else:
             aligned = dist_dest < align_xy_threshold  # 3D distance -- no separate surface to be "on top of" here
+            base_ok = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
 
         reward = torch.zeros(env.num_envs, device=env.device)
 
@@ -200,11 +217,16 @@ class staged_achievements(ManagerTermBase):
         self._align_best = align_new_best
 
         # -- release event, evaluated against whatever was held the step before release --
+        # The aligned-release bonus is one-time: paid on every release, grab-the-top-block-and-
+        # re-release-it-aligned was a farmable loop (+1 per cycle), which is exactly what the
+        # policy did after stacking (re-grasped its own tower, 0/10 still standing at t=10s).
         released = self._was_holding & (~grasped)
+        aligned_release_first = released & aligned & (~self._aligned_release_done)
+        self._aligned_release_done = self._aligned_release_done | (released & aligned)
         release_reward = torch.where(
-            released,
-            torch.where(aligned, release_aligned_reward, release_misaligned_penalty),
-            torch.zeros_like(reward),
+            aligned_release_first,
+            torch.full_like(reward, release_aligned_reward),
+            torch.where(released & ~aligned, release_misaligned_penalty, 0.0),
         )
         reward = reward + release_reward
         self._release_aligned_count += (released & aligned).float()
@@ -219,7 +241,7 @@ class staged_achievements(ManagerTermBase):
         # tipping off the red one -- PPO learned to trigger it (85% "success", mostly not stacked).
         settled = torch.linalg.norm(object_.data.root_vel_w.torch[:, :3], dim=1) < success_max_speed
         clear = dist_to_obj > hand_clear_dist
-        cond = aligned & settled & (~grasped) & clear & (finger_frac < finger_closed_threshold)
+        cond = aligned & settled & (~grasped) & clear & (finger_frac < finger_closed_threshold) & base_ok
         self._success_streak = torch.where(cond, self._success_streak + 1, torch.zeros_like(self._success_streak))
         success = self._success_streak >= success_hold_steps
         # Per-step reward for every step the finished stack stands with the hand clear. Episodes no
