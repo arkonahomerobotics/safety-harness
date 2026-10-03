@@ -55,7 +55,11 @@ map geometry. That's the "writing it up" half of the 2-3 days. This tool targets
 
 - **`map_io.py`**: loads a real ROS/Nav2 map — the standard `<name>.yaml` + `<name>.pgm` pair the
   map_server / Nav2 map saver produces (a format essentially unchanged for over a decade). No ROS
-  install needed; it's a plain YAML file and a plain PGM image.
+  install needed; it's a plain YAML file and a plain PGM image. Handles both documented occupancy
+  modes (`trinary`, the default, and `scale`); a `mode: raw` YAML — whose pixel semantics are
+  consumer-defined rather than standardized — raises a clear `MapLoadError` rather than guessing.
+  Every malformed-input path (missing file, missing key, bad image, inverted thresholds, ...) raises
+  `MapLoadError` with a specific message naming the file and the problem, never a bare traceback.
 - **`geometry.py`**: real algorithms, not stand-ins — a two-pass chamfer distance transform (grid
   clearance-to-nearest-obstacle), Bresenham ray casting (line-of-sight), and a real 8-connected A*
   (used to get an honest, actually-computed route to scan, in place of a real `nav2_route` export
@@ -70,10 +74,15 @@ map geometry. That's the "writing it up" half of the 2-3 days. This tool targets
   - `intersection_flagged_for_review`: exact graph analysis (not sampled) — flags any route-graph
     node where 3+ directions meet, a real crossing point ISO 3691-4's zone classification cares
     about.
-- **`scan_demo.py`**: loads the real warehouse map (`maps/`, from the `navigation2` project's own
-  example maps — see `maps/README.md`), computes a real A* route across it, runs the two geometric
-  rules along that route, and runs the graph rule against a small representative route-graph example
-  (this public map doesn't ship a `nav2_route` graph — see "Honest limitations" below).
+- **`scan_demo.py`**: both the runnable self-check demo *and* a client-usable CLI — run against the
+  bundled warehouse map by default, or any real `<name>.yaml`/`<name>.pgm` pair via `--map`. See
+  "Run it" below for every flag.
+- **`report.py`**: renders a scan's findings into a clean, self-contained Markdown report
+  (`--report out.md`) — map metadata, a coverage table (which rules were evaluated vs. honestly
+  skipped), per-finding list with world coordinates in metres, the method used, and the same
+  disclaimers as this README's "Design boundary"/"Honest limitations", reused verbatim rather than
+  reworded. Deliberately unbranded: no client/site/company header. See "A note on the report
+  format" below for why.
 - **`tests/`**: fast unit tests against small hand-built grids/graphs (`python3 -m unittest discover
   -s examples/nav2_hazard_scan/tests -v`, from the repo root, with `numpy`/`pillow` installed).
 - **`live_costmap.py`** / **`live_scan_demo.py`** / **`Dockerfile.live`**: the same rules fed a real
@@ -84,8 +93,49 @@ map geometry. That's the "writing it up" half of the 2-3 days. This tool targets
 
 ```bash
 pip install numpy pillow pyyaml
-python3 examples/nav2_hazard_scan/scan_demo.py
+cd examples/nav2_hazard_scan   # scan_demo.py's imports are bare (geometry, hazard_rules, map_io,
+                                # report) and resolve against this directory, same as every other
+                                # script here -- see tests/ for the sys.path.insert pattern if you
+                                # need to import these modules from somewhere else instead
+python3 scan_demo.py
 ```
+
+With no flags, this is the original self-check demo: the bundled real `navigation2` warehouse map,
+a real A* route, and an assertion that every evaluated rule produced both an ok and a flagged
+finding (proving the rules fire against real data — see "Results" below). **The junction/crossing
+rule is never evaluated by default** — this public map ships no real `nav2_route` graph, and
+falling back to a toy one by default would overstate what was actually checked. The console output
+and the `--report` coverage table both say plainly "not evaluated, no route graph supplied."
+
+Point it at your own map and get a report instead:
+
+```bash
+python3 scan_demo.py --map /path/to/your_map.yaml --report findings.md
+
+# include the junction/crossing rule, against your map's real route graph
+# (JSON: {"nodes": {id: [x, y]}, "edges": [[from_id, to_id], ...]} -- the same shape nav2_route uses)
+python3 scan_demo.py --map /path/to/your_map.yaml --route_graph /path/to/route.json --report findings.md
+
+# set thresholds from your own risk assessment instead of the illustrative defaults
+python3 scan_demo.py --map /path/to/your_map.yaml --min_clearance_m 0.6 --required_sightline_m 2.5
+
+# demonstrate the junction rule itself, against this tool's own small example graph (never implied
+# by default, and clearly labeled as a demonstration in the output -- see "Honest limitations")
+python3 scan_demo.py --demo_graph
+```
+
+A malformed `--map`, `--route_graph`, or a `--map`/`--route_graph` combination that leaves no route
+exits non-zero with a clear, specific message on stderr, never a bare traceback — see
+`tests/test_map_io.py`/`tests/test_cli.py`.
+
+### A note on the report format
+
+`report.py`'s Markdown output is deliberately generic and unbranded (no client/site/company
+header) — it lives in this Apache-2.0 repo, so it stays something anyone can run and read without
+any commercial framing attached. A polished, client-branded report layer (headers, an executive
+summary, a company name) is a legitimate, separate, licensable product built *on top of* this
+tool's output — see the PR this shipped in for that discussion — and deliberately doesn't belong
+inside the open-source engine itself.
 
 ## Results (2026-09-28, against the real `navigation2` warehouse map)
 
@@ -95,6 +145,10 @@ blind_corner_absent: 41 ok, 94 flagged
 intersection_flagged_for_review: 4 ok, 1 flagged
 PASS: every rule fired against real data (ok + at least one real flag each)
 ```
+
+(Reproducing the `intersection_flagged_for_review` line above today needs `--demo_graph` —
+see "Run it": the junction rule is no longer evaluated by default, for the honesty reason
+explained there.)
 
 All three rules produce real findings against real map geometry, not synthetic pass-throughs. The
 `blind_corner_absent` flag rate looks high at first glance — worth explaining honestly rather than
@@ -157,9 +211,11 @@ localization.
 - **One scenario against one real map, not a validated campaign.** This proves the approach is
   tractable and the three rules work against real data; it is not a validated tool for a real site
   assessment yet.
-- **No real `nav2_route` graph for this map.** `intersection_flagged_for_review` is demonstrated
-  against a small, clearly-labeled representative graph in `scan_demo.py`, not this map's own real
-  route topology (it doesn't ship one). Fully tested against real graph shapes in `tests/`.
+- **No real `nav2_route` graph for this map.** By default `intersection_flagged_for_review` is not
+  evaluated at all for this map, honestly — see "Run it" above. `scan_demo.py --demo_graph` runs it
+  against a small, clearly-labeled representative graph instead, for demonstrating the rule itself,
+  never as a stand-in for this map's own real route topology (it doesn't ship one). Fully tested
+  against real graph shapes in `tests/`.
 - **The live variant's map and the Gazebo world it's spawned in don't match** (see above) — fine for
   proving the live-data plumbing works, not a real site assessment of that world.
 - **Ramps/inclines are out of scope.** A plain 2D occupancy grid carries no elevation data; detecting
