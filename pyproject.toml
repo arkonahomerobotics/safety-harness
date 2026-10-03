@@ -29,10 +29,10 @@ classifiers = [
 safety-harness-conformance = "safety_harness.conformance.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/naganumakr/safety-harness"
-Repository = "https://github.com/naganumakr/safety-harness"
-Issues = "https://github.com/naganumakr/safety-harness/issues"
-"Design doc" = "https://github.com/naganumakr/safety-harness/blob/main/docs/design.md"
+Homepage = "https://github.com/arkonahomerobotics/safety-harness"
+Repository = "https://github.com/arkonahomerobotics/safety-harness"
+Issues = "https://github.com/arkonahomerobotics/safety-harness/issues"
+"Design doc" = "https://github.com/arkonahomerobotics/safety-harness/blob/main/docs/design.md"
 
 [tool.setuptools.packages.find]
 include = ["safety_harness*"]
