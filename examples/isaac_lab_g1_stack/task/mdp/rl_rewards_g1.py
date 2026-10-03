@@ -97,7 +97,7 @@ class staged_achievements(ManagerTermBase):
         self._closed_vals = torch.where(lo.abs() > hi.abs(), lo, hi)
 
     def reset(self, env_ids: torch.Tensor):
-        if len(env_ids) > 0:
+        if isinstance(env_ids, slice) or len(env_ids) > 0:  # env_ids may be slice(None) for a full reset
             log = self._env.extras.setdefault("log", {})
             log["Achievements/reach_budget_used"] = self._reach_budget_used[env_ids].mean().item()
             log["Achievements/grasped_rate"] = self._grasped_done[env_ids].float().mean().item()

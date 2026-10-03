@@ -147,6 +147,10 @@ class G1BlockStackRLEnvCfg(FixedBaseUpperBodyIKG1EnvCfg):
     def __post_init__(self):
         # Deliberately not calling the base __post_init__: all it adds beyond these timing settings is
         # the Pink IK URDF path and the XR teleop pipeline, neither of which this task uses.
+        # left_hand_contact/right_hand_contact only feed the XR haptic pipeline this task skips, and
+        # carry a stale asset-path regex for this scene -- found and fixed 2026-10-02/03.
+        self.scene.left_hand_contact = None
+        self.scene.right_hand_contact = None
         self.decimation = 4
         self.sim.dt = 1 / 200  # 200Hz physics, 50Hz control -- same as the base task
         self.sim.render_interval = 2
@@ -183,7 +187,7 @@ class G1BlockStackRLReverseCurriculumEnvCfg(G1BlockStackRLEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        from isaaclab_tasks.manager_based.manipulation.stack.mdp import rl_events
+        from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp import rl_events_g1 as rl_events
 
         # defined last, so it overrides the block randomization for the envs it picks
         self.events.reset_from_snapshots = EventTerm(
