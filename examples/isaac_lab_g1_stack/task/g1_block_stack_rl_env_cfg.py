@@ -86,6 +86,7 @@ class ObservationsCfg:
 _STACK = {
     "place_asset_cfg": SceneEntityCfg("block_b"),
     "place_height": BLOCK,
+    "stack_xy_tol": 0.025,  # Kaoru-approved 2026-10-03: real towers 1.5-2.1cm off-center were failing a 1.5cm bar on 4.5cm blocks (Isaac Lab's own Franka cubes_stacked uses 4cm on 4.7cm cubes)
     "finger_closed_threshold": 0.3,
     # real released placement only -- see staged_achievements' success comment
     "success_hold_steps": 15,
@@ -183,7 +184,7 @@ class G1BlockStackRLReverseCurriculumEnvCfg(G1BlockStackRLEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        from isaaclab_tasks.manager_based.manipulation.stack.mdp import rl_events
+        from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp import rl_events_g1 as rl_events
 
         # defined last, so it overrides the block randomization for the envs it picks
         self.events.reset_from_snapshots = EventTerm(

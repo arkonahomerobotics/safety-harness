@@ -100,7 +100,7 @@ with torch.inference_mode():
         dz = pa[:, 2] - pb[:, 2] - 0.045
         still = torch.linalg.norm(env.scene["object"].data.root_vel_w.torch[:, :3], dim=1) < 0.03
         b_on_table = (pb[:, 2] - env.cfg.scene.block_b.init_state.pos[2]).abs() < 0.01
-        return (dxy < 0.015) & (dz.abs() < 0.012) & still & b_on_table & (torch.linalg.norm(pa - w, dim=1) > 0.11)
+        return (dxy < 0.025) & (dz.abs() < 0.012) & still & b_on_table & (torch.linalg.norm(pa - w, dim=1) > 0.11)  # Kaoru-approved 2.5cm, 2026-10-03
 
     # Isaac Lab resets an env inside the very step() that times it out, so the scene read after the
     # loop (or after the done step) is the NEXT episode's reset pose -- that made "standing at the
