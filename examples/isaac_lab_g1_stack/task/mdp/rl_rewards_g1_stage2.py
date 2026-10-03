@@ -208,13 +208,22 @@ def block_a_off_b(
     block_b_cfg: SceneEntityCfg = SceneEntityCfg("block_b"),
     place_height: float = 0.045,
     margin: float = 0.02,
+    grace_steps: int = 5,
 ) -> torch.Tensor:
     """Termination: A has dropped more than `margin` below its expected seat on B's live pose --
     the base of the tower was knocked loose (onto the table, or off to the side with it). Checked
     directly against B's current height (not a static rest value), same reasoning as `tower_ok`
-    above: being "on the table" is not itself a failure for A in this task, being OFF B is."""
+    above: being "on the table" is not itself a failure for A in this task, being OFF B is.
+
+    `grace_steps` skips the check for the first few steps after reset: a zero-action sanity check
+    (256 envs, 20 steps) found this firing in 7.1% of expert-mid-carry-snapshot starts even with no
+    policy action -- settling physics from the snapshot restore, since that snapshot only stores C
+    + robot joints, not A/B, so the robot's captured arm pose can slightly overlap a freshly
+    randomized A/B placement. Not the dominant driver of the live ~93% termination rate (0 of
+    handoff/default starts tripped), but free to rule out."""
     block_a: RigidObject = env.scene[block_a_cfg.name]
     block_b: RigidObject = env.scene[block_b_cfg.name]
     a_z = block_a.data.root_pos_w.torch[:, 2]
     b_z = block_b.data.root_pos_w.torch[:, 2]
-    return (a_z - b_z) < (place_height - margin)
+    off = (a_z - b_z) < (place_height - margin)
+    return off & (env.episode_length_buf >= grace_steps)

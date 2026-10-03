@@ -82,3 +82,25 @@ class G1BlockStackBCPPORunnerCfg(G1BlockStackPPORunnerCfg):
         desired_kl=0.005,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class G1BlockStack3Stage2BCPPORunnerCfg(G1BlockStackBCPPORunnerCfg):
+    """Stage-2 analogue of G1BlockStackBCPPORunnerCfg: PPO fine-tuning from a behavior-cloned
+    actor, same reasoning -- Run F/G (fresh init, action std 1.0) learned to grasp/lift C well
+    (grasped_rate 98%+ by iteration 300) but never saw a success: block_a_off_b terminated ~93-97%
+    of episodes at a mean length of ~17/500 steps, matching the Franka Stage-2 history on this box
+    exactly (a randomly-initialized policy at std 1.0 flails into the tower before it can ever
+    place anything). init_std=0.3 (not BC's usual 0.15) per Kaoru/Engineering Development's call --
+    Stage 2 is a harder multi-object task than Stage 1's BC warm-start, worth a bit more initial
+    exploration around the cloned behavior."""
+
+    experiment_name = "g1_block_stack_3stage2_bc"
+    max_iterations = 2000
+    actor = RslRlMLPModelCfg(
+        hidden_dims=[512, 256, 128],
+        activation="elu",
+        obs_normalization=True,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.3),
+    )
+    critic = RslRlMLPModelCfg(hidden_dims=[512, 256, 128], activation="elu", obs_normalization=True)

@@ -41,6 +41,7 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--corr_gain", type=float, default=0.1)
 parser.add_argument("--safe_z", type=float, default=0.90, help="rise/transit height, world z -- above the tower top (0.81) with hand clearance")
 parser.add_argument("--snapshots", type=str, default="")
+parser.add_argument("--record", type=str, default="", help="save (policy obs, clean expert action) pairs from successful episodes, for bc_train.py")
 parser.add_argument("--video", type=str, default="")
 parser.add_argument("--quiet", action="store_true")
 AppLauncher.add_app_launcher_args(parser)
@@ -114,6 +115,7 @@ with torch.inference_mode():
     snap_block_c = torch.zeros(N, 7, device=dev)
     grip = -torch.ones(N, device=dev)
     frames = []
+    rec_obs, rec_act, rec_live = [], [], []
     tmo = torch.tensor(TIMEOUT, device=dev)
     t0 = time.time()
     c0 = (blk_pick.data.root_pos_w.torch - origins).clone()
@@ -191,6 +193,10 @@ with torch.inference_mode():
         act[:, 0:3] = (quat_apply_inverse(rq, pos_err) / POS_SCALE).clamp(-1, 1)
         act[:, 3:6] = (quat_apply_inverse(rq, rot_err) / ROT_SCALE).clamp(-1, 1)
         act[:, 6] = grip
+        if args_cli.record:
+            rec_obs.append(obs["policy"].clone())
+            rec_act.append(act.clone())
+            rec_live.append(phase != DONE)
         obs, *_ = env.step(act)
         t_in += 1
         if step % 20 == 0 and not args_cli.quiet:
@@ -275,6 +281,12 @@ with torch.inference_mode():
         torch.save({"joint_pos": snap_joint[keep].cpu(), "cube_pose": snap_block_c[keep].cpu().unsqueeze(1)}, args_cli.snapshots)
         print(f"saved {int(keep.sum())} snapshots (robot joints + block_c pose only; A/B restored by the "
               f"env's own reset events) -> {args_cli.snapshots}")
+    if args_cli.record:
+        O = torch.stack(rec_obs, 1)[success]  # (S, T, obs)
+        A = torch.stack(rec_act, 1)[success]
+        L = torch.stack(rec_live, 1)[success]
+        torch.save({"obs": O[L].cpu(), "act": A[L].cpu(), "n_episodes": int(success.sum())}, args_cli.record)
+        print(f"recorded {int(L.sum())} (obs, action) pairs from {int(success.sum())} successful episodes -> {args_cli.record}")
     if args_cli.video and frames:
         import imageio
 
