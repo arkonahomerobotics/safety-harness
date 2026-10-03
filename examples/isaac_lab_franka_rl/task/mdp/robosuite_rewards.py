@@ -254,9 +254,12 @@ class milestone_stack_reward(ManagerTermBase):
         self._done = torch.zeros(n, 2, 5, dtype=torch.bool, device=d)
         self._complete_ever = torch.zeros(n, dtype=torch.bool, device=d)
         self._complete_now = torch.zeros(n, dtype=torch.bool, device=d)
+        self._phi_prev = torch.zeros(n, device=d)
+        self._have_prev = torch.zeros(n, dtype=torch.bool, device=d)
 
     def reset(self, env_ids: torch.Tensor):
         env_ids = _as_env_ids(self._env, env_ids)
+        self._have_prev[env_ids] = False
         if len(env_ids) > 0:
             log = self._env.extras.setdefault("log", {})
             for lvl in (0, 1):
@@ -282,7 +285,7 @@ class milestone_stack_reward(ManagerTermBase):
         self._complete_ever[env_ids] = False
         self._complete_now[env_ids] = False
 
-    def _level(self, env, upper, lower, contact_sensor, finger_sensors, lift_z, over_xy, thr, reach_dist):
+    def _level(self, env, upper, lower, contact_sensor, finger_sensors, lift_z, over_xy, thr, reach_dist, rest_z=0.0203):
         up = env.scene[upper].data.root_pos_w.torch
         ee = env.scene["ee_frame"].data.target_pos_w.torch[:, 0, :]
         reach = torch.linalg.norm(ee - up, dim=1) < reach_dist
@@ -296,7 +299,15 @@ class milestone_stack_reward(ManagerTermBase):
         lift = grasp & lifted
         over = lift & near
         placed = lifted & touching & ~grasp
-        return torch.stack((reach, grasp, lift, over, placed), dim=1)
+        # bounded potential in [0, 1]: nearness of gripper to cube, grasp, grasped height, grasped nearness to target
+        zrel = (up[:, 2] - env.scene.env_origins[:, 2] - rest_z).clamp(0.0, 0.1) / 0.1
+        phi = (
+            0.2 * (1.0 - torch.tanh(torch.linalg.norm(ee - up, dim=1) / 0.1))
+            + 0.2 * grasp.float()
+            + 0.3 * grasp.float() * zrel
+            + 0.3 * lift.float() * (1.0 - torch.tanh(torch.linalg.norm(up[:, :2] - lo[:, :2], dim=1) / 0.1))
+        )
+        return torch.stack((reach, grasp, lift, over, placed), dim=1), phi
 
     def __call__(
         self,
@@ -309,9 +320,11 @@ class milestone_stack_reward(ManagerTermBase):
         reward_scale: float = 1.0,
         milestone_values: tuple[float, float, float, float, float] = (0.1, 0.2, 0.4, 0.5, 0.8),
         completion_reward: float = 2.0,
+        potential_scale: float = 0.0,
+        gamma: float = 0.99,
     ) -> torch.Tensor:
         thr = contact_threshold
-        l1 = self._level(
+        l1, phi1 = self._level(
             env, "cube_2", "cube_1", "red_blue_contact", ("left_finger_red_contact", "right_finger_red_contact"),
             lift_z, over_xy, thr, reach_dist,
         )
@@ -326,7 +339,7 @@ class milestone_stack_reward(ManagerTermBase):
         if mode == "stage1":
             complete = l1[:, 4]
         else:
-            l2 = self._level(
+            l2, phi2 = self._level(
                 env, "cube_3", "cube_2", "green_red_contact",
                 ("left_finger_green_contact", "right_finger_green_contact"), lift_z, over_xy, thr, reach_dist,
             )
@@ -337,6 +350,20 @@ class milestone_stack_reward(ManagerTermBase):
             complete = l2[:, 4]
             held_lifted = l2[:, 2] if mode == "stage2" else (l1[:, 2] | l2[:, 2])
 
+        if potential_scale > 0.0:
+            # Ng/Harada/Russell potential-based shaping, gamma*Phi(s') - Phi(s): telescopes along any trajectory, so it
+            # cannot change the optimal policy, and standing still in a high-potential state nets a small negative.
+            if mode == "stage1":
+                phi = torch.where(l1[:, 4], torch.ones_like(phi1), phi1)
+            elif mode == "stage2":
+                phi = torch.where(l1[:, 4], torch.where(l2[:, 4], torch.ones_like(phi2), phi2), torch.zeros_like(phi2))
+            else:
+                phi2_total = torch.where(l2[:, 4], torch.ones_like(phi2), phi2)
+                phi = torch.where(l1[:, 4], 1.0 + phi2_total, phi1)
+            shaping = gamma * phi - self._phi_prev
+            reward += potential_scale * torch.where(self._have_prev, shaping, torch.zeros_like(shaping))
+            self._phi_prev = phi
+            self._have_prev[:] = True
         reward += completion_reward * (2.0 if mode != "stage1" else 1.0) * complete.float()
         self._steps += 1.0
         self._held_lifted_steps += held_lifted.float()
