@@ -35,6 +35,9 @@ def _pct(t: torch.Tensor, q: float) -> float:
 
 env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
 env_cfg.seed = args_cli.seed
+# XR-teleop leftover, unconditionally defined on the base scene cfg; crashes sensor init unless
+# enable_cameras is set (same bug eval_policy.py already works around).
+env_cfg.scene.robot_pov_cam = None
 env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
 
 with torch.inference_mode():
