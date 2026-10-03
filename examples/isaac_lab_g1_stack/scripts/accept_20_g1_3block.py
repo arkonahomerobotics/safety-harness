@@ -251,7 +251,12 @@ for ep in range(args_cli.episodes):
         if handed:
             act = policy2(obs["policy"]).clamp(-1, 1)
         else:
-            act = policy1(stack_state(env)).clamp(-1, 1)
+            # Stage 1's checkpoint was trained on its own ObservationsCfg's concatenated
+            # (state, actions) group -- see g1_block_stack_rl_env_cfg.py -- not raw stack_state
+            # alone (50-dim vs the checkpoint's real 57-dim normalizer). last_action is this same
+            # env's action_manager.action, identical semantics to training's own ObsTerm.
+            s1_obs = torch.cat([stack_state(env), env.action_manager.action], dim=1)
+            act = policy1(s1_obs).clamp(-1, 1)
         obs, rew, term, trunc, extras = env.step(act)
 
         if bool(term[0]) or bool(trunc[0]):
