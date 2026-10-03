@@ -15,8 +15,9 @@ BASE_IK_SCALE = 0.5  # the base IK-Rel task's arm-action scale the expert's gain
 class Expert:
     """expert_stack.py's phase machine, unchanged, with a configurable task list (one pick-and-place per stage)."""
 
-    def __init__(self, tasks, phase="above"):
+    def __init__(self, tasks, phase="above", seated_override=True):
         self.tasks = tasks
+        self.seated_override = seated_override
         self.task_idx = 0
         self.phase = phase
         self.phase_steps = 0
@@ -36,6 +37,13 @@ class Expert:
         target = eef.copy()
         xy_err_obj = np.linalg.norm((obj - eef)[:2])
         holding = np.linalg.norm(obj - eef) < 0.03 and finger < 0.035
+        if (self.seated_override and not holding and self.phase not in ("release", "retreat")
+                and abs(obj[2] - dest[2] - CUBE_H) < 0.006 and np.linalg.norm((obj - dest)[:2]) < 0.015):
+            # DAgger labelling: the policy (not this expert) already placed and let go of the cube. The unchanged
+            # phase machine would see "not holding" and go back to "above" -- i.e. pick the cube off the stack
+            # again. Treat it as placed: release (open, hold still) -> retreat -> done.
+            self.set_phase("release")
+            self.phase_steps = 1
 
         if self.phase == "above":
             target = obj + np.array([0, 0, HOVER])
@@ -125,3 +133,62 @@ def infer_phase(eef, cubes, finger, obj_name, dest_name):
 
 def seated(top, bottom):
     return (np.abs(top[:, 2] - bottom[:, 2] - CUBE_H) < 0.006) & (np.linalg.norm(top[:, :2] - bottom[:, :2], axis=1) < 0.015)
+
+
+class MarkovExpert:
+    """Stateless (Markov) version of the same pick-and-place: the phase is recomputed from the current state every
+    step instead of being carried in a phase machine with timers and hysteresis.
+
+    Why: the MLP policy only sees the current observation. The phase machine labels identical states differently
+    depending on its history -- e.g. "fingers closed on the cube, cube still on the table" is labelled "hold still"
+    for the rest of the 12-step grasp timer and then "lift at full speed"; "cube held 1 cm off-center over blue"
+    is "lower" or "go back up to hover" depending on how it got there. Cloned, those conflicts average into fixed
+    points (v1-v4 BC policies stalled at the grasp and while hovering over blue), and DAgger labels from a shadow
+    phase machine conflict with the demos. Here every state has one label. Same targets, gains, clips and hover
+    heights as Expert; the timers are replaced by gripper state (lift once the fingers have stopped on the cube,
+    retreat once they have opened) and the hysteresis by single thresholds.
+    """
+
+    F_HOLD = 0.0338  # finger joint pos when closed on a cube: 0.026-0.0332 (demo data p1-p99); open = 0.04
+    F_OPEN = 0.038   # released
+
+    def __init__(self, tasks, phase="above", seated_override=True):
+        self.tasks = tasks
+        self.phase = phase
+        self.done = False
+
+    def act(self, eef, cubes, finger):
+        obj_name, dest_name = self.tasks[0]
+        obj, dest = cubes[obj_name], cubes[dest_name]
+        hover_z = dest[2] + CUBE_H + HOVER
+        near = np.linalg.norm(obj - eef) < 0.03
+        dz = obj[2] - dest[2] - CUBE_H
+        dxy = np.linalg.norm((obj - dest)[:2])
+        seated = abs(dz) < 0.006 and dxy < 0.015
+        seated_tight = abs(dz) < 0.004 and dxy < 0.015
+        holding = near and finger < self.F_HOLD
+        grip, target, z_max = OPEN, eef.copy(), AMAX
+        if seated and (not near or finger >= self.F_OPEN):
+            if eef[2] < hover_z - 0.02:
+                phase, target = "retreat", np.array([eef[0], eef[1], hover_z])
+            else:
+                phase = "done"
+        elif seated_tight and near and (holding or finger < self.F_OPEN):
+            phase = "release"  # open in place until the fingers are clear
+        elif holding:
+            grip = CLOSE
+            if np.linalg.norm((dest - eef)[:2]) < 0.02:
+                phase, target, z_max = "lower", dest + np.array([0, 0, CUBE_H + 0.004]), 0.02
+            elif eef[2] < hover_z - 0.015:
+                phase, target = "lift", np.array([eef[0], eef[1], hover_z])
+            else:
+                phase, target = "move", dest + np.array([0, 0, CUBE_H + HOVER])
+        elif np.linalg.norm(obj - eef) < 0.008 or (np.linalg.norm(obj - eef) < 0.02 and finger < self.F_OPEN):
+            phase, target, grip = "grasp", obj.copy(), CLOSE  # at the cube, or already closing on it
+        elif np.linalg.norm((obj - eef)[:2]) < 0.01 and eef[2] > obj[2] - 0.005:
+            phase, target, z_max = "descend", obj.copy(), 0.02
+        else:
+            phase, target = "above", obj + np.array([0, 0, HOVER])
+        self.phase = phase
+        self.done = phase == "done"
+        return Expert._to(eef, target, grip, z_max=z_max)

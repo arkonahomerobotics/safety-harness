@@ -71,11 +71,13 @@ PR.
     `eval_chain.py`, `record_chain.py`, `test_snapshot_reset.py`, `smoke_test_rl_env.py`,
     `inspect_prims.py`, `_smoke_suite.sh`.
   - **New, written during the port** (not from Brev — the behavior-cloning warm start the current
-    GPU-box run is using): `bc_expert.py` (the scripted expert's phase machine, pure numpy, no Kit
-    dependency), `collect_bc_franka.py` (records expert demonstrations inside the RL task's own
-    observation/action space), `bc_train_franka.py` (clones those demonstrations into an `rsl_rl`
-    checkpoint `train.py --checkpoint` can warm-start PPO from), `diag_bc_franka.py` (compares a
-    policy's rollout against a shadow scripted expert, phase by phase).
+    GPU-box run is using, now at v6; see "BC warm start" below for the full history and measured
+    results): `bc_expert.py` (pure numpy, no Kit dependency; the original phase-machine expert plus
+    `MarkovExpert`, its stateless v4+ replacement), `collect_bc_franka.py` (records expert
+    demonstrations inside the RL task's own observation/action space, with orientation-hold labels
+    and optional DAgger rollouts), `bc_train_franka.py` (clones those demonstrations into an
+    `rsl_rl` checkpoint `train.py --checkpoint` can warm-start PPO from), `diag_bc_franka.py`
+    (compares a policy's rollout against a shadow scripted expert, phase by phase).
   - **`accept_20.py`** (also new): the acceptance gate to run once a chained stage-1/stage-2
     checkpoint pair looks good on `eval_chain.py`'s aggregate numbers — 20 sequential, single-env,
     seeded, deterministic episodes judged on the env's own chained-success definition, with optional
@@ -130,16 +132,86 @@ adapt the same recovered logic to APIs that moved underneath it.
 
 ## Current status
 
-**Smoke-tested only. No training results from this port yet — none are claimed above; the Brev
-numbers above are the original runs, not reproduced here.** `scripts/smoke_test_rl_env.py` and
-`scripts/_smoke_suite.sh` confirm the ported task constructs, steps, and resets cleanly under Isaac
-Lab 3.0 (including the contact-sensor path resolution above). Training in progress on the GPU box
-follows a BC-warm-start-then-PPO recipe that did not exist on the Brev box (see "New, written during
-the port" above): collect scripted-expert demonstrations in the RL task's own observation/action
-space (`collect_bc_franka.py`), clone them into a PPO actor checkpoint (`bc_train_franka.py`), then
-resume PPO training from that checkpoint (`train.py --checkpoint`) instead of from scratch. No
-success-rate numbers exist for this yet — do not cite a number for the ported pipeline until a real
-evaluation (`eval_stacking.py`/`eval_chain.py`) has actually been run against it.
+**Smoke-tested, plus real (non-Brev) BC results below. No PPO-from-BC results on this port yet.**
+`scripts/smoke_test_rl_env.py` and `scripts/_smoke_suite.sh` confirm the ported task constructs,
+steps, and resets cleanly under Isaac Lab 3.0 (including the contact-sensor path resolution above).
+Training on the GPU box follows a BC-warm-start-then-PPO recipe that did not exist on the Brev box
+(see "New, written during the port" above and "BC warm start" below): collect scripted-expert
+demonstrations in the RL task's own observation/action space (`collect_bc_franka.py`), clone them
+into a PPO actor checkpoint (`bc_train_franka.py`), then resume PPO training from that checkpoint
+(`train.py --checkpoint`) instead of from scratch. The BC stage itself now has real, measured
+numbers (below) — **PPO started from a BC checkpoint does not yet; that part is pending.** Don't
+cite a post-PPO success-rate number for this port until a real evaluation
+(`eval_stacking.py`/`eval_chain.py`) has actually been run against a PPO-fine-tuned checkpoint.
+
+## BC warm start
+
+**Why BC at all.** Kaoru's direction for this port is "RL plus a scripted expert," not RL from
+scratch -- the scripted expert already does the task (see `expert_stack.py`), so the only thing
+worth learning from scratch is the policy's own commitment to it under the noise/time limits PPO
+imposes. Behavior cloning here is explicitly an *initializer*, not the trained policy: it exists to
+give PPO a starting actor whose exploration starts from "already roughly does the task" instead of
+from "random, and must discover grasping before it can discover anything else" -- the exact
+problem the Brev box's own reverse-curriculum/snapshot machinery was built to route around a
+different way. PPO still does the actual training; BC only sets where it starts.
+
+**History (v1 -> v6), each version a real, measured failure mode, not a guess at one:**
+
+| Version | Approach | Result |
+|---|---|---|
+| v1 | Plain BC: clone the scripted expert's (obs, action) pairs directly | **0.1%** -- collapsed to copying `last_action` rather than reacting to the actual observation |
+| v2 | Shuffle the observation during training (breaks the `last_action` shortcut) | ~19% -- real learning, but still far from the expert's own success rate |
+| v3 | DAgger: the partially-trained BC policy drives rollouts, a shadow copy of the scripted expert's phase machine re-labels every state it visits | 68.7%, then regressed to **39%** on a later round -- the phase machine carries timers/hysteresis, so it labels the *same* state differently depending on how it got there; cloned, those conflicting labels average into a fixed point rather than correct behavior (see the next row) |
+| v4/v5 | Replace the phase-machine expert with `bc_expert.MarkovExpert`: a **stateless** expert that recomputes its phase from the live state every step, so the same state always gets the same label, by construction | **95.7%, deterministic** -- but **0%** once rotation noise is injected during data collection, since the expert itself never rotates the hand at all, so no label ever taught the cloned policy how to correct a rotation error |
+| v6 | Add orientation-hold labels: a small P-controller (`collect_bc_franka.py`'s `--rot_gain`/`--rot_max`) labels the rotation action dims to correct the hand back toward its nominal orientation, instead of leaving them at zero | current best -- see measured results below |
+
+**The action-space inversion, verified, not assumed.** The scripted expert drives the base task
+(`IsaacContrib-Stack-Cube-Franka-IK-Rel`, plain IK-Rel, `scale = 0.5`): an expert xyz command `a`
+means an intended end-effector delta `d = 0.5 * a`. The RL tasks use `DistanceScaledIKRelAction`
+(`task/mdp/rl_actions_impl.py`), whose delta is `s(state) * a_rl`, with `s` recomputed from the
+*current* state every step. So the RL-space label that reproduces the expert's intended delta is
+`a_rl = 0.5 * a / s(state)`, with `s(state)` read live from the env's own action term (not
+re-derived independently, which could silently drift from whatever the action term actually does)
+via `collect_bc_franka.py --check_scale`. Verified against the real running env: the scale-factor
+check itself matched exactly (diff 0), and the resulting applied position delta matched the
+expert's intended one to 1.9e-9 m -- floating-point noise, not a modeling error.
+
+**Measured v6 results** (deterministic unless noted):
+
+- Stage 1: **100%** deterministic (measured at 1024 of the 8192 training envs).
+- Stage 1, stochastic (action std 0.3, matching PPO's own exploration noise): **93.8%** by the end of the episode.
+- Chained (stage 1 -> stage 2, full tower): **94.3%** deterministic, **67.6%** stochastic.
+
+These are BC-policy numbers, evaluated the same way `eval_stacking.py`/`eval_chain.py` judge any
+other checkpoint -- not a PPO result, and not claimed as one.
+
+**Exact commands.** Collection (stage 1 then stage 2 -- stage 2 needs a stage-2 snapshot file first,
+see "Snapshot and training commands" below):
+
+```bash
+./isaaclab.sh -p collect_bc_franka.py --stage 1 --num_envs 256 --target_pairs 1500000 \
+    --out bc_data/stage1_markov_rothold.pt --template_out bc_data/template_stage1.pt
+./isaaclab.sh -p collect_bc_franka.py --stage 2 --num_envs 256 --target_pairs 1500000 \
+    --out bc_data/stage2_markov_rothold.pt
+```
+
+Both default to `--expert markov` (the v4+ stateless expert) with orientation-hold labels on (omit
+`--no_rot_hold` to keep them on, which is the v6 recipe above). Clone into a checkpoint `train.py
+--checkpoint` can load:
+
+```bash
+./isaaclab.sh -p bc_train_franka.py \
+    --data "bc_data/stage1_markov_rothold.pt,bc_data/stage2_markov_rothold.pt" \
+    --template bc_data/template_stage1.pt --out bc_checkpoints/bc_v6.pt
+```
+
+PPO, warm-started from that checkpoint (**pending -- not yet run on this port**):
+
+```bash
+./isaaclab.sh -p train.py --task Isaac-Stack-Cube-Franka-IK-Rel-RL-Robosuite-Snap-Sparse-v0 \
+    --headless --num_envs 8192 --resume --load_run <dir containing bc_v6.pt> \
+    --checkpoint bc_v6.pt --run_name ppo_from_bc_v6
+```
 
 ## Snapshot and training commands (from the original Brev runs — paths not yet re-verified on this port)
 

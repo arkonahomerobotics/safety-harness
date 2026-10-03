@@ -12,6 +12,7 @@ parser.add_argument("--task", type=str, default="Isaac-Stack-Cube-Franka-IK-Rel-
 parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--num_envs", type=int, default=256)
 parser.add_argument("--steps", type=int, default=600)
+parser.add_argument("--expert", choices=("phase", "markov"), default="markov")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.headless = True
@@ -49,7 +50,8 @@ robot = u.scene["robot"]
 fid, _ = robot.find_joints("panda_finger_joint.*")
 arm = u.action_manager.get_term("arm_action")
 origins = u.scene.env_origins
-experts = [cbf.Expert([("cube_2", "cube_1")]) for _ in range(n)]
+EX = cbf.MarkovExpert if args_cli.expert == "markov" else cbf.Expert
+experts = [EX([("cube_2", "cube_1")]) for _ in range(n)]
 min_reach = np.full(n, 9.0)
 lifted = np.zeros(n, bool)
 over_blue = np.zeros(n, bool)

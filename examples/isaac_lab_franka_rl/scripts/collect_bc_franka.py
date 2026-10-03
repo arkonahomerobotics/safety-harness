@@ -1,13 +1,14 @@
 """Collect behavior-cloning demos for the Franka cube-stacking PPO policy INSIDE the RL task env (RL obs, RL actions).
 
-The scripted expert (expert_stack.py's phase machine, unchanged) runs inside the RL task, and its commands are
-expressed in the RL task's action space:
+The scripted expert runs inside the RL task (default ``--expert markov``: the stateless variant of expert_stack.py's
+phase machine in bc_expert.py -- same targets/gains/clips, but one label per state, which is what made BC work;
+``--expert phase`` is the original phase machine), and its commands are expressed in the RL task's action space:
 
 * expert_stack.py drives the base task ``IsaacContrib-Stack-Cube-Franka-IK-Rel`` whose arm action is plain IK-Rel with
   ``scale = 0.5``: an expert xyz command ``a`` means an intended end-effector delta ``d = 0.5 * a`` (m per env step).
 * The RL tasks use ``DistanceScaledIKRelAction`` (mdp/rl_actions_impl.py): delta = ``s(state) * a_rl`` with the scale
   ``s`` recomputed from the current state in ``process_actions``. So the RL action producing the expert's intended
-  delta is ``a_rl = 0.5 * a / s(state)`` (rotation dims stay 0, the gripper stays +-1).
+  delta is ``a_rl = 0.5 * a / s(state)`` (the gripper stays +-1; rotation: see below, same ``/ s``).
 * ``s(state)`` is not re-derived here: before each step the env's own arm action term is asked for it by calling its
   ``process_actions`` on a dummy action and reading ``_scale``. ``env.step`` then calls ``process_actions`` again on
   the same (unchanged) state with the real action, so the scale is identical; ``--check_scale`` asserts it after the
@@ -18,8 +19,13 @@ expert only does red (cube_2) onto blue (cube_1), releases, retreats and then ho
 Stage 2 (``--stage 2``): Stage2Skill task, every episode starts from its expert snapshot distribution; the expert does
 green (cube_3) onto red (cube_2). Its phase is inferred from the snapshot state at the first step after reset.
 
-DART-style data: the EXECUTED action gets Gaussian noise (in RL action units, xyz only) and optional "shove"
-perturbations; the recorded LABEL is always the clean expert action. Only successful episodes are kept, and only up
+Rotation: the expert never rotates, so the rotation dims are labelled with an orientation hold (P-control back to the
+nominal straight-down hand quaternion, ``--q_nom``); without it the cloned policy collapsed to 0% as soon as PPO-style
+noise (std 0.3, even 0.05 -> 64%) was put on the rotation dims.
+
+DART-style data: the EXECUTED action gets Gaussian noise (in RL action units; xyz ``--noise_std``, rotation
+``--rot_noise_std``) and optional "shove" perturbations; the recorded LABEL is always the clean expert action.
+``--dagger_policy``: DAgger -- the given checkpoint drives and every visited state is labelled. Only successful episodes are kept, and only up
 to ``--hold_steps`` steps after the expert finished (then the env is forced to time out, so no sim time is spent on
 idle hold). ``--noise_std 0 --perturb_prob 0 --no_save`` measures the expert itself in the RL action space.
 
@@ -47,6 +53,14 @@ parser.add_argument("--template_out", type=str, default=None)
 parser.add_argument("--no_save", action="store_true")
 parser.add_argument("--check_scale", action="store_true", help="assert the inversion every step (slower)")
 parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--rot_noise_std", type=float, default=0.2,
+                    help="Gaussian noise std on executed rotation dims (RL action units); labels correct it")
+parser.add_argument("--rot_gain", type=float, default=0.5, help="orientation-hold gain (per-step fraction of the error)")
+parser.add_argument("--rot_max", type=float, default=0.05, help="max orientation correction per step (rad)")
+parser.add_argument("--q_nom", type=str, default=None, help="nominal hand quat x,y,z,w (default: mean at start)")
+parser.add_argument("--no_rot_hold", action="store_true", help="old behaviour: rotation labels always 0")
+parser.add_argument("--expert", choices=("phase", "markov"), default="markov",
+                    help="phase = expert_stack.py's phase machine; markov = its stateless variant (BC-friendly labels)")
 parser.add_argument("--dagger_policy", type=str, default=None,
                     help="DAgger: an rsl_rl checkpoint whose (deterministic) actions are executed; the expert only labels")
 parser.add_argument("--dagger_beta", type=float, default=0.0,
@@ -63,12 +77,16 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 import isaaclab_tasks  # noqa: F401,E402
+from isaaclab.utils.math import axis_angle_from_quat, quat_conjugate, quat_mul  # noqa: E402
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry, parse_env_cfg  # noqa: E402
 
 import sys  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from bc_expert import AMAX, BASE_IK_SCALE, CLOSE, OPEN, Expert, infer_phase, seated  # noqa: E402
+from bc_expert import AMAX, BASE_IK_SCALE, CLOSE, OPEN, Expert, MarkovExpert, infer_phase, seated  # noqa: E402
+
+if args_cli.expert == "markov":
+    Expert = MarkovExpert  # noqa: F811  (stateless labels; see bc_expert.MarkovExpert)
 
 
 def main():
@@ -157,6 +175,8 @@ def main():
     succ_len = []
     scale_err_max, delta_err_max = 0.0, 0.0
     label_abs = []
+    q_nom = None
+    rot_err_log = []
 
     def sample_shoves():
         out = []
@@ -190,6 +210,7 @@ def main():
             scale_np = scale.cpu().numpy().astype(np.float64)
 
             exp_cmd = np.zeros((n, 7), dtype=np.float64)
+            fresh_now = fresh.copy()
             shove_delta = np.zeros((n, 3), dtype=np.float64)
             record = np.zeros(n, dtype=bool)
             for i in range(n):
@@ -223,6 +244,24 @@ def main():
             label = np.zeros((n, 7), dtype=np.float64)
             label[:, :3] = BASE_IK_SCALE * exp_cmd[:, :3] / scale_np[:, None]
             label[:, 6] = exp_cmd[:, 6]
+            # orientation hold: the expert never rotates, so a cloned policy has no idea how to undo a rotation and
+            # PPO's exploration on the rotation dims (std 0.05 already cost a third of the successes) wrecks it.
+            # Label the rotation dims with a P-controller back to the nominal (straight-down) hand orientation:
+            # IK-Rel applies the rotation delta as quat_from_axis_angle(d) * q (base = world axes for the Franka).
+            if not args_cli.no_rot_hold and total_steps >= 2 * n:  # (ee_frame settled after the first reset)
+                q = env.scene["ee_frame"].data.target_quat_w.torch[:, 0, :]
+                if q_nom is None and args_cli.q_nom:
+                    q_nom = torch.tensor([[float(v) for v in args_cli.q_nom.split(",")]], device=dev)
+                if q_nom is None:
+                    q0 = q[0:1].expand_as(q)
+                    qa = torch.where(((q * q0).sum(1, keepdim=True) < 0), -q, q).mean(0, keepdim=True)
+                    q_nom = qa / qa.norm()
+                    print(f"[collect] nominal hand quat (xyzw) = {[round(float(v), 4) for v in q_nom[0]]}", flush=True)
+                err = axis_angle_from_quat(quat_mul(q_nom.expand_as(q), quat_conjugate(q)))
+                d_rot = (args_cli.rot_gain * err).clamp(-args_cli.rot_max, args_cli.rot_max).double().cpu().numpy()
+                active = ~(judged | fresh_now)
+                label[active, 3:6] = d_rot[active] / scale_np[active, None]
+                rot_err_log.append(float(err.norm(dim=1).median()))
             executed = label.copy()
             shoved = np.abs(shove_delta).sum(1) > 0
             executed[shoved, :3] = np.clip(shove_delta[shoved] / scale_np[shoved, None], -3.0, 3.0)
@@ -232,6 +271,8 @@ def main():
                 executed[pol_drive & shoved, :3] = np.clip(shove_delta[pol_drive & shoved] / scale_np[pol_drive & shoved, None], -3.0, 3.0)
             if args_cli.noise_std > 0:
                 executed[:, :3] += rng.normal(scale=args_cli.noise_std, size=(n, 3))
+            if args_cli.rot_noise_std > 0:
+                executed[:, 3:6] += rng.normal(scale=args_cli.rot_noise_std, size=(n, 3))
 
             lab_t = torch.tensor(label, dtype=torch.float32, device=dev)
             rec_ids = np.nonzero(record)[0]
@@ -324,6 +365,9 @@ def main():
     if label_abs:
         la = np.concatenate(label_abs)
         print(f"COLLECT |label xyz| max per step: median={np.median(la):.3f} p99={np.percentile(la, 99):.3f} max={la.max():.3f}")
+    if rot_err_log:
+        print(f"COLLECT hand orientation error vs nominal (median over envs, rad): mean {np.mean(rot_err_log):.3f} "
+              f"max {np.max(rot_err_log):.3f}")
     if args_cli.check_scale:
         print(f"COLLECT inversion check: max |scale(pre-step query) - scale(env.step)| = {scale_err_max:.2e}; "
               f"max |applied delta - 0.5*expert cmd| (clean steps) = {delta_err_max:.2e} m")
