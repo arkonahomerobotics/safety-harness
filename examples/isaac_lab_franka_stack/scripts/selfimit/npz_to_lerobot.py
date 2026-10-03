@@ -40,7 +40,10 @@ import pyarrow.parquet as pq
 
 FPS = 20
 CHUNKS_SIZE = 1000
-NAME_RE = re.compile(r"^seed(\d+)_ep(\d+)_(\d+)steps\.npz$")
+# Matches an optional source-dir prefix (e.g. "raw_f1_seed4004_..." when multiple collection
+# dirs -- different friction/env settings -- get merged into one raw_dir, filenames prefixed to
+# keep provenance) ahead of the real "seedN_epM_Ksteps.npz" stem.
+NAME_RE = re.compile(r"^(?:.*_)?seed(\d+)_ep(\d+)_(\d+)steps\.npz$")
 
 DATA_PATH_TEMPLATE = "data/chunk-{chunk:03d}/episode_{ep:06d}.parquet"
 VIDEO_PATH_TEMPLATE = "videos/chunk-{chunk:03d}/{video_key}/episode_{ep:06d}.mp4"
@@ -174,7 +177,7 @@ def _episode_table(d: dict, episode_index: int, task_index: int, index_start: in
 
 
 def convert(raw_dir: Path, out_dir: Path, max_steps: int, seed_stats_from: Path, embodiment_tag: str) -> list[dict]:
-    npz_paths = sorted(raw_dir.glob("seed*_ep*_*steps.npz"))
+    npz_paths = sorted(raw_dir.glob("*seed*_ep*_*steps.npz"))
     kept = []
     skipped = []
     for p in npz_paths:
