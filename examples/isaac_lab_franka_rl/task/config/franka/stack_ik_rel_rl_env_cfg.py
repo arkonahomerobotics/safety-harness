@@ -507,3 +507,58 @@ class FrankaCubeStackRLStage2SkillContactEnvCfg_PLAY(FrankaCubeStackRLStage2Skil
     def __post_init__(self):
         super().__post_init__()
         _play(self)
+
+
+# --- Strict sparse-only variants: reward is paid only for the true completed state. -----------------
+# No smoothness penalties, no shaping, no pretrained/BC weights. The step-size ramp in the action term and
+# the optional expert start states are environment design, not reward; each variant says which it uses.
+
+
+def _strict_sparse(cfg) -> None:
+    for name in ("action_rate", "joint_vel", "gripper_smoothness"):
+        setattr(cfg.rewards, name, None)
+
+
+@configclass
+class FrankaCubeStackRLStrictS1SnapEnvCfg(FrankaCubeStackRLRobosuiteSnapSparseEnvCfg):
+    """Stage 1, sparse-only, 50% expert 'red carried onto blue' start states."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        _strict_sparse(self)
+
+
+@configclass
+class FrankaCubeStackRLStrictS1EnvCfg(FrankaCubeStackRLStrictS1SnapEnvCfg):
+    """Stage 1, sparse-only, ordinary starts only (no expert-sampled start states)."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.events.reset_from_snapshot = None
+
+
+@configclass
+class FrankaCubeStackRLStrictStage2SkillEnvCfg(FrankaCubeStackRLStage2SkillEnvCfg):
+    """Stage-2 skill (green onto red-on-blue), tower-only sparse, expert stage-2 start states."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        _strict_sparse(self)
+
+
+@configclass
+class FrankaCubeStackRLStrictFullSnapEnvCfg(FrankaCubeStackRLTowerOnlySnapEnvCfg):
+    """Single end-to-end policy for the whole 3-cube tower, tower-only sparse, stage-1/2 expert start-state mix."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        _strict_sparse(self)
+
+
+@configclass
+class FrankaCubeStackRLStrictFullEnvCfg(FrankaCubeStackRLStrictFullSnapEnvCfg):
+    """Single end-to-end policy for the whole 3-cube tower, tower-only sparse, ordinary starts only."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.events.reset_from_snapshot = None
