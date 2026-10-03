@@ -298,9 +298,9 @@ class milestone_stack_reward(ManagerTermBase):
         near = torch.linalg.norm(up[:, :2] - lo[:, :2], dim=1) < over_xy
         lift = grasp & lifted
         over = lift & near
-        placed = lifted & touching & ~grasp
+        placed = lifted & touching & ~grasp & near
         # bounded potential in [0, 1]: nearness of gripper to cube, grasp, grasped height, grasped nearness to target
-        zrel = (up[:, 2] - env.scene.env_origins[:, 2] - rest_z).clamp(0.0, 0.1) / 0.1
+        zrel = (up[:, 2] - env.scene.env_origins[:, 2] - rest_z).clamp(0.0, 0.06) / 0.06
         phi = (
             0.2 * (1.0 - torch.tanh(torch.linalg.norm(ee - up, dim=1) / reach_kernel))
             + 0.2 * grasp.float()
