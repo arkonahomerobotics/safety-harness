@@ -185,7 +185,7 @@ for i in range(args_cli.episodes):
     early = False
     frames = []
 
-    with torch.inference_mode():
+    with torch.no_grad():
         for t in range(T):
             s1, tower, aux = states()
 
