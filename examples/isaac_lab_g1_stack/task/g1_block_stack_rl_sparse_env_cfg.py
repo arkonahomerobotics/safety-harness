@@ -28,12 +28,19 @@ EXPERT_START_PROB = 0.15
 
 @configclass
 class SparseRewardsCfg:
-    """Pure milestone + potential-shaping reward -- see rl_rewards_g1_sparse's own docstring for
-    why there are deliberately no smoothness/action-rate penalties either: matching the Franka
-    team's validated "Strict" config exactly for this first run, rather than introducing another
-    untested variable alongside a reward design that's already new for this robot."""
+    """Milestone + potential-shaping reward -- see rl_rewards_g1_sparse's own docstring for why
+    there are deliberately no smoothness/action-rate penalties either.
 
-    stack = RewTerm(func=rl_rewards_g1_sparse.milestone_stack_reward_g1, weight=1.0)
+    BUG FOUND 2026-10-04 (after Run L/L2/L3/M all stalled at "over" for ~6000+ iterations):
+    potential_scale defaults to 0.0 in milestone_stack_reward_g1, and this cfg never overrode it,
+    so every one of those runs trained on milestones ALONE -- exactly the "milestone-only was
+    undiscoverable" failure mode this whole design exists to avoid (see Franka's own KAN-48
+    history). The shaping code was written and never actually turned on. potential_scale=10
+    matches Franka's own validated MilestonePotential config."""
+
+    stack = RewTerm(
+        func=rl_rewards_g1_sparse.milestone_stack_reward_g1, weight=1.0, params={"potential_scale": 10.0}
+    )
 
 
 @configclass
