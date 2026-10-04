@@ -451,6 +451,16 @@ gym.register(
 )
 
 gym.register(
+    id="Isaac-Stack-Cube-Franka-IK-Rel-RL-MilestonePotential-Stage2SkillH-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stack_ik_rel_rl_env_cfg:FrankaCubeStackRLMilestonePotentialStage2SkillHEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:StackCubePPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
     id="Isaac-Stack-Cube-Franka-IK-Rel-RL-MilestonePotential-Full-Snap-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     kwargs={

@@ -285,7 +285,7 @@ class milestone_stack_reward(ManagerTermBase):
         self._complete_ever[env_ids] = False
         self._complete_now[env_ids] = False
 
-    def _level(self, env, upper, lower, contact_sensor, finger_sensors, lift_z, over_xy, thr, reach_dist, rest_z=0.0203, reach_kernel=0.4, over_kernel=0.2):
+    def _level(self, env, upper, lower, contact_sensor, finger_sensors, lift_z, over_xy, thr, reach_dist, rest_z=0.0203, reach_kernel=0.4, over_kernel=0.2, height_span=0.06):
         up = env.scene[upper].data.root_pos_w.torch
         ee = env.scene["ee_frame"].data.target_pos_w.torch[:, 0, :]
         reach = torch.linalg.norm(ee - up, dim=1) < reach_dist
@@ -300,7 +300,7 @@ class milestone_stack_reward(ManagerTermBase):
         over = lift & near
         placed = lifted & touching & ~grasp & near
         # bounded potential in [0, 1]: nearness of gripper to cube, grasp, grasped height, grasped nearness to target
-        zrel = (up[:, 2] - env.scene.env_origins[:, 2] - rest_z).clamp(0.0, 0.06) / 0.06
+        zrel = (up[:, 2] - env.scene.env_origins[:, 2] - rest_z).clamp(0.0, height_span) / height_span
         phi = (
             0.2 * (1.0 - torch.tanh(torch.linalg.norm(ee - up, dim=1) / reach_kernel))
             + 0.2 * grasp.float()
@@ -322,6 +322,8 @@ class milestone_stack_reward(ManagerTermBase):
         completion_reward: float = 2.0,
         potential_scale: float = 0.0,
         gamma: float = 0.99,
+        lift_z_l2: float | None = None,
+        height_span_l2: float = 0.06,
     ) -> torch.Tensor:
         thr = contact_threshold
         l1, phi1 = self._level(
@@ -341,7 +343,8 @@ class milestone_stack_reward(ManagerTermBase):
         else:
             l2, phi2 = self._level(
                 env, "cube_3", "cube_2", "green_red_contact",
-                ("left_finger_green_contact", "right_finger_green_contact"), lift_z, over_xy, thr, reach_dist,
+                ("left_finger_green_contact", "right_finger_green_contact"),
+                lift_z if lift_z_l2 is None else lift_z_l2, over_xy, thr, reach_dist, height_span=height_span_l2,
             )
             l2 = l2 & l1[:, 4:5]  # level-2 milestones count only while red stands on blue
             new = l2 & ~self._done[:, 1]
