@@ -63,3 +63,16 @@ gym.register(
 gym.spec("Isaac-Stack-Blocks-G1-RL-Stage2-RC-v0").kwargs["rsl_rl_bc_cfg_entry_point"] = (
     f"{agents.__name__}.rsl_rl_ppo_cfg_g1_block:G1BlockStack3Stage2BCPPORunnerCfg"
 )
+
+# -- KAN-49: from-scratch E2E RL, no BC/warm-start, milestone + potential-shaping sparse reward --
+# see g1_block_stack_rl_sparse_env_cfg.py's own module docstring. Plain (non-BC) PPO runner cfg
+# on purpose: there is no pretrained checkpoint to fine-tune from.
+gym.register(
+    id="Isaac-Stack-Blocks-G1-RL-Sparse-S1-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.g1_block_stack_rl_sparse_env_cfg:G1BlockStackRLSparseEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg_g1_block:G1BlockStackPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
