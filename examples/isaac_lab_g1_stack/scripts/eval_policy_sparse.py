@@ -57,6 +57,8 @@ if hasattr(env_cfg.events, "reset_from_snapshots"):
     env_cfg.events.reset_from_snapshots.params["prob"] = 0.0
 env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
 
+NAMES = ("reach", "grasp", "lift", "over", "placed")
+
 with torch.inference_mode():
     obs, _ = env.reset()
     dev, N = env.device, env.num_envs
@@ -64,6 +66,12 @@ with torch.inference_mode():
     policy = load_actor(args_cli.checkpoint, dev)
     stack_term = env.reward_manager.get_term_cfg("stack").func
     ever_complete = torch.zeros(N, dtype=torch.bool, device=dev)
+    # Full milestone ladder, not just the final "placed" flag -- the expert-start snapshot mix
+    # (forced to 0 above for this eval, but its effect on the TRAINING logs needs separating out)
+    # places the block already held and roughly aligned, so "over" itself could be just as
+    # free-ridden during training as "placed" was found to be. Track the whole chain cold so that
+    # doesn't get missed a second time.
+    ever_milestone = torch.zeros(N, len(NAMES), dtype=torch.bool, device=dev)
 
     outcome = torch.full((N,), -1, dtype=torch.long, device=dev)  # -1 running, 0 placed, 1 other
     final_placed = torch.zeros(N, dtype=torch.bool, device=dev)
@@ -71,12 +79,14 @@ with torch.inference_mode():
 
     for step in range(env.max_episode_length + 5):
         pre_placed = stack_term._complete_now.clone()
+        pre_done_milestones = stack_term._done.clone()
         act = policy(obs["policy"])
         if args_cli.noise > 0:
             act = act + args_cli.noise * torch.randn_like(act)
         act = act.clamp(-1, 1)
         obs, rew, term, trunc, extras = env.step(act)
         ever_complete |= pre_placed
+        ever_milestone |= pre_done_milestones
         done = (term | trunc) & (outcome < 0)
         final_placed = torch.where(done, pre_placed, final_placed)
         if done.any():
@@ -85,6 +95,9 @@ with torch.inference_mode():
         if bool((outcome >= 0).all()):
             break
 
+print("COLD-START milestone-ever rates (full ladder, no expert-start assistance):")
+for i, name in enumerate(NAMES):
+    print(f"  {name:>6}_ever: {int(ever_milestone[:, i].sum())}/{N} ({ever_milestone[:, i].float().mean()*100:.2f}%)")
 print(f"COLD-START FULL-EPISODE end state: placed & standing at episode end: {int(final_placed.sum())}/{N}")
 print(f"ACHIEVED-AT-ANY-POINT (same completion definition, same def as training): {int(ever_complete.sum())}/{N}")
 print(
