@@ -109,9 +109,11 @@ class milestone_stack_reward_g1(ManagerTermBase):
         finger_closed_threshold: float = 0.5,
         minimal_lift_height: float = 0.03,
         over_xy: float = 0.04,
+        over_z: float = 0.04,
         hand_clear_dist: float = 0.11,
         reach_kernel: float = 0.3,
         over_kernel: float = 0.1,
+        z_kernel: float = 0.05,
         lift_potential_cap: float = 0.06,
         wrist_link_name: str = "left_wrist_yaw_link",
         robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -140,7 +142,14 @@ class milestone_stack_reward_g1(ManagerTermBase):
         rest_z = env.cfg.scene.object.init_state.pos[2]
         lifted = grasp & (object_pos[:, 2] > rest_z + minimal_lift_height)
         dist_xy_target = torch.linalg.norm((object_pos - target)[:, :2], dim=1)
-        over = lifted & (dist_xy_target < over_xy)
+        dist_z_target = (object_pos[:, 2] - target[:, 2]).abs()
+        # "over" used to be xy-only, true at ANY height above the target -- found 2026-10-05 after
+        # two from-scratch seeds both showed placed_given_prev stuck at exactly 0.0: nothing in the
+        # milestone ladder or the potential ever rewarded descending to the real target height, only
+        # xy alignment and generic "is lifted at all" (capped well below the target height anyway).
+        # A policy could satisfy "over" hovering well above the target indefinitely with no pressure
+        # to ever learn the final, precise descent-and-release placed() actually requires.
+        over = lifted & (dist_xy_target < over_xy) & (dist_z_target < over_z)
         hand_clear = _left_hand_min_dist(env, robot_cfg, self._hand_link_ids, object_pos)
         base_rest_z = env.cfg.scene.block_b.init_state.pos[2]
         base_on_table = (base_pos[:, 2] - base_rest_z).abs() < 0.01
@@ -164,8 +173,12 @@ class milestone_stack_reward_g1(ManagerTermBase):
         phi_raw = (
             0.2 * (1.0 - torch.tanh(dist_wrist_obj / reach_kernel))
             + 0.2 * grasp.float()
-            + 0.3 * grasp.float() * zrel
-            + 0.3 * lifted.float() * (1.0 - torch.tanh(dist_xy_target / over_kernel))
+            + 0.2 * grasp.float() * zrel
+            + 0.2 * lifted.float() * (1.0 - torch.tanh(dist_xy_target / over_kernel))
+            # Real gradient toward the target's actual height, not just "is lifted at all" (zrel
+            # above caps at lift_potential_cap regardless of whether that's anywhere near the
+            # target) -- this is the term that was missing entirely before 2026-10-05.
+            + 0.2 * lifted.float() * (1.0 - torch.tanh(dist_z_target / z_kernel))
         )
         phi = torch.where(placed, torch.ones_like(phi_raw), phi_raw)
 
